@@ -371,6 +371,9 @@ including:
 
 Likely next steps:
 
+- make it faster to use the computer
+- add background control capabilities closer to Codex `@Computer Use`
+- improve visualization
 - signed helper app packaging
 - notarization
 - cleaner permission onboarding
