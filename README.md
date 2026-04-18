@@ -1,8 +1,8 @@
 # mac-computer-use
 
-An unsigned macOS Computer Use MCP server with a native Swift helper.
+A macOS MCP clone of Codex `@Computer Use`, built to make the same tool interfaces and desktop-control capabilities available to other coding agents.
 
-This project clones the tool surface of Codex `@Computer Use` closely enough to be useful from any MCP client that supports local `stdio` servers.
+This project reproduces the Codex Computer Use tool surface with a Node MCP server and a native Swift helper so any MCP client that supports local `stdio` servers can use a similar interface on macOS.
 
 Current status:
 
@@ -11,45 +11,6 @@ Current status:
 - installable from source
 - real native behavior for all 9 observed tools
 - best experience on a machine where the host app already has `Accessibility` and `Screen Recording` permissions
-
-## What It Does
-
-The server exposes the same high-level tool set we observed from Codex Computer Use:
-
-- `list_apps`
-- `get_app_state`
-- `click`
-- `drag`
-- `type_text`
-- `press_key`
-- `set_value`
-- `scroll`
-- `perform_secondary_action`
-
-Under the hood:
-
-- the MCP server is a Node `stdio` process
-- the native behavior lives in [`helper/ComputerUseNativeHelper.swift`](./helper/ComputerUseNativeHelper.swift)
-- the helper handles accessibility inspection/actions, pointer/keyboard events, screenshots, and the visible second cursor overlay
-
-## Current Behavior
-
-What already works:
-
-- app listing
-- app/window state snapshots with accessibility tree text
-- screenshot artifacts in MCP responses
-- semantic element IDs like `main`, `AllClear`, `Delete`
-- background-first AX actions where macOS allows it
-- pointer actions with focus restore
-- a visible animated second cursor overlay
-
-Current limitations:
-
-- unsigned packaging, so this is not a mainstream one-click install yet
-- `list_apps` does not include recent non-running apps, `last-used`, or `uses`
-- exact bundled text/localization parity is incomplete
-- background semantics are strongest for AX-backed actions; pointer/keyboard actions are still best-effort restore, not guaranteed true background control
 
 ## Requirements
 
@@ -153,6 +114,26 @@ If your client prefers explicit runtime invocation:
 }
 ```
 
+## What It Does
+
+The server exposes the same high-level tool set we observed from Codex Computer Use:
+
+- `list_apps`
+- `get_app_state`
+- `click`
+- `drag`
+- `type_text`
+- `press_key`
+- `set_value`
+- `scroll`
+- `perform_secondary_action`
+
+Under the hood:
+
+- the MCP server is a Node `stdio` process
+- the native behavior lives in [`helper/ComputerUseNativeHelper.swift`](./helper/ComputerUseNativeHelper.swift)
+- the helper handles accessibility inspection/actions, pointer/keyboard events, screenshots, and the visible second cursor overlay
+
 ## Tool Summary
 
 ### `list_apps`
@@ -234,6 +215,25 @@ Accepts either:
 - traversal index like `9`
 - semantic element ID like `AllClear`
 
+## Current Behavior
+
+What already works:
+
+- app listing
+- app/window state snapshots with accessibility tree text
+- screenshot artifacts in MCP responses
+- semantic element IDs like `main`, `AllClear`, `Delete`
+- background-first AX actions where macOS allows it
+- pointer actions with focus restore
+- a visible animated second cursor overlay
+
+Current limitations:
+
+- unsigned packaging, so this is not a mainstream one-click install yet
+- `list_apps` does not include recent non-running apps, `last-used`, or `uses`
+- exact bundled text/localization parity is incomplete
+- background semantics are strongest for AX-backed actions; pointer/keyboard actions are still best-effort restore, not guaranteed true background control
+
 ## Example Result Shape
 
 See:
@@ -259,21 +259,6 @@ Main files:
 - [`src/server.ts`](./src/server.ts)
 - [`src/native-helper-backend.ts`](./src/native-helper-backend.ts)
 - [`helper/ComputerUseNativeHelper.swift`](./helper/ComputerUseNativeHelper.swift)
-
-## Recommended Open Source Framing
-
-Describe this repo as:
-
-- an unsigned macOS alpha
-- source-install first
-- intended for technical users and early adopters
-- focused on cloning the Codex Computer Use MCP surface and behavior
-
-Do not describe it as:
-
-- a signed app
-- notarized
-- zero-friction for non-technical users
 
 ## Troubleshooting
 
@@ -329,43 +314,6 @@ That is expected.
 
 - AX-backed actions like `set_value` and some `perform_secondary_action` cases can stay background-first
 - pointer and keyboard actions are still best-effort restore, not guaranteed true background control across all apps
-
-## Publish As Its Own Repo
-
-Recommended standalone repo name:
-
-- `mac-computer-use`
-
-Recommended publish flow:
-
-1. Copy this directory into its own repo root
-2. Keep the existing docs:
-   - `README.md`
-   - `SPECS.md`
-   - `RESULT_SCHEMA.md`
-   - `COMPARE.md`
-   - `NOTES.md`
-3. Commit without:
-   - `node_modules`
-   - `.swift-cache`
-   - `.swift-home`
-4. Push as an unsigned macOS alpha for technical users
-
-## Known Good Validation Areas
-
-This clone has already been exercised against:
-
-- Calculator
-- TextEdit
-- Google Chrome
-
-including:
-
-- background AX press
-- focus-restored click
-- focus-restored scroll
-- settable text mutation
-- screenshot-returning post-action state
 
 ## Roadmap
 
