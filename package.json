@@ -1,0 +1,26 @@
+{
+  "name": "mac-computer-use",
+  "version": "0.1.0",
+  "description": "Unsigned macOS Computer Use MCP server with a native Swift helper.",
+  "type": "module",
+  "bin": {
+    "mac-computer-use": "./bin/mac-computer-use.js"
+  },
+  "scripts": {
+    "start": "COMPUTER_USE_BACKEND=native-helper node --import tsx src/server.ts",
+    "start:cli": "COMPUTER_USE_BACKEND=cli node --import tsx src/server.ts",
+    "start:native": "COMPUTER_USE_BACKEND=native-helper node --import tsx src/server.ts",
+    "smoke": "COMPUTER_USE_BACKEND=native-helper node --import tsx scripts/smoke.ts",
+    "check": "tsc --noEmit -p tsconfig.json",
+    "test": "node --import tsx --test test/*.test.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.17.5",
+    "tsx": "^4.20.5",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "typescript": "^5.9.2"
+  }
+}

@@ -1,0 +1,7 @@
+node_modules/
+.swift-cache/
+.swift-home/
+dist/
+coverage/
+.DS_Store
+*.log

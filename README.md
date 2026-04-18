@@ -1,0 +1,378 @@
+# mac-computer-use
+
+An unsigned macOS Computer Use MCP server with a native Swift helper.
+
+This project clones the tool surface of Codex `@Computer Use` closely enough to be useful from any MCP client that supports local `stdio` servers.
+
+Current status:
+
+- macOS only
+- unsigned alpha
+- installable from source
+- real native behavior for all 9 observed tools
+- best experience on a machine where the host app already has `Accessibility` and `Screen Recording` permissions
+
+## What It Does
+
+The server exposes the same high-level tool set we observed from Codex Computer Use:
+
+- `list_apps`
+- `get_app_state`
+- `click`
+- `drag`
+- `type_text`
+- `press_key`
+- `set_value`
+- `scroll`
+- `perform_secondary_action`
+
+Under the hood:
+
+- the MCP server is a Node `stdio` process
+- the native behavior lives in [`helper/ComputerUseNativeHelper.swift`](./helper/ComputerUseNativeHelper.swift)
+- the helper handles accessibility inspection/actions, pointer/keyboard events, screenshots, and the visible second cursor overlay
+
+## Current Behavior
+
+What already works:
+
+- app listing
+- app/window state snapshots with accessibility tree text
+- screenshot artifacts in MCP responses
+- semantic element IDs like `main`, `AllClear`, `Delete`
+- background-first AX actions where macOS allows it
+- pointer actions with focus restore
+- a visible animated second cursor overlay
+
+Current limitations:
+
+- unsigned packaging, so this is not a mainstream one-click install yet
+- `list_apps` does not include recent non-running apps, `last-used`, or `uses`
+- exact bundled text/localization parity is incomplete
+- background semantics are strongest for AX-backed actions; pointer/keyboard actions are still best-effort restore, not guaranteed true background control
+
+## Requirements
+
+- macOS
+- Node.js 20+ recommended
+- Xcode Command Line Tools with `swift`
+- a host app with:
+  - `Accessibility` permission
+  - `Screen Recording` permission
+
+For most source installs, the host app is whichever app launches the MCP server, for example:
+
+- Terminal
+- iTerm
+- Warp
+- Codex
+- Cursor
+
+This project is intentionally `Option A`: unsigned alpha packaging for technical users. Permissions are attached to the host app/runtime context, not to a polished signed helper app.
+
+## Install
+
+From the repo root:
+
+```bash
+npm install
+npm run check
+npm test
+chmod +x bin/mac-computer-use.js
+```
+
+## Permissions Setup
+
+Grant permissions to the app that will launch the MCP server.
+
+Examples:
+
+- if you run it from Terminal, enable `Terminal`
+- if you run it from Codex, enable `Codex`
+- if you run it from Cursor, enable `Cursor`
+
+macOS settings to enable:
+
+1. `System Settings > Privacy & Security > Accessibility`
+2. `System Settings > Privacy & Security > Screen Recording` or `Screen & System Audio Recording`
+
+After changing permissions, fully restart the host app.
+
+## Run
+
+Recommended path:
+
+```bash
+npm run start:native
+```
+
+Alternative CLI backend:
+
+```bash
+npm run start:cli
+```
+
+The CLI backend exists mainly for comparison and fallback. The native-helper backend is the intended path.
+
+Smoke test:
+
+```bash
+npm run smoke
+```
+
+Optional app override:
+
+```bash
+npm run smoke -- TextEdit
+```
+
+## MCP Client Config
+
+Use the packaged launcher:
+
+```json
+{
+  "mcpServers": {
+    "computer-use": {
+      "command": "/absolute/path/to/mac-computer-use/bin/mac-computer-use.js"
+    }
+  }
+}
+```
+
+If your client prefers explicit runtime invocation:
+
+```json
+{
+  "mcpServers": {
+    "computer-use": {
+      "command": "node",
+      "args": ["/absolute/path/to/mac-computer-use/bin/mac-computer-use.js"]
+    }
+  }
+}
+```
+
+## Tool Summary
+
+### `list_apps`
+
+Returns a user-facing inventory of currently running apps.
+
+Structured result includes:
+
+- `name`
+- `bundleId`
+- `pid`
+- `running`
+- `frontmost`
+- `visible`
+
+### `get_app_state`
+
+Returns:
+
+- app identity
+- window title
+- accessibility tree text
+- structured elements
+- screenshot artifact when available
+
+Structured elements include fields such as:
+
+- `index`
+- `id`
+- `role`
+- `title`
+- `description`
+- `value`
+- `focused`
+- `settable`
+- `actions`
+- `bounds`
+
+### `click`
+
+Currently implemented with coordinate clicks on the native backend.
+
+### `drag`
+
+Native pointer drag between coordinates.
+
+### `type_text`
+
+Literal text input using native event synthesis.
+
+### `press_key`
+
+Native key press support for:
+
+- printable keys
+- common special keys
+- modifier combinations such as `cmd+c`, `shift+tab`
+
+### `set_value`
+
+Direct AX value mutation for settable UI elements.
+
+This is one of the strongest background-safe paths.
+
+### `scroll`
+
+Native scroll at the target app/window center.
+
+### `perform_secondary_action`
+
+Executes AX actions such as:
+
+- `Press`
+- `Raise`
+- `ShowMenu`
+
+Accepts either:
+
+- traversal index like `9`
+- semantic element ID like `AllClear`
+
+## Example Result Shape
+
+See:
+
+- [`RESULT_SCHEMA.md`](./RESULT_SCHEMA.md)
+- [`SPECS.md`](./SPECS.md)
+- [`COMPARE.md`](./COMPARE.md)
+- [`NOTES.md`](./NOTES.md)
+
+## Development
+
+Useful commands:
+
+```bash
+npm run check
+npm test
+npm run smoke
+npm run start:native
+```
+
+Main files:
+
+- [`src/server.ts`](./src/server.ts)
+- [`src/native-helper-backend.ts`](./src/native-helper-backend.ts)
+- [`helper/ComputerUseNativeHelper.swift`](./helper/ComputerUseNativeHelper.swift)
+
+## Recommended Open Source Framing
+
+Describe this repo as:
+
+- an unsigned macOS alpha
+- source-install first
+- intended for technical users and early adopters
+- focused on cloning the Codex Computer Use MCP surface and behavior
+
+Do not describe it as:
+
+- a signed app
+- notarized
+- zero-friction for non-technical users
+
+## Troubleshooting
+
+### The cursor appears but does not disappear
+
+- restart the MCP host app after pulling new changes
+- re-run a real pointer action like `click` or `scroll`
+- verify you are using the native-helper backend, not the CLI backend:
+
+```bash
+npm run start:native
+```
+
+### Actions fail with accessibility errors
+
+Make sure the app launching the MCP server is enabled in:
+
+1. `System Settings > Privacy & Security > Accessibility`
+2. fully quit and reopen that host app
+
+Common examples:
+
+- Terminal
+- Codex
+- Cursor
+- Warp
+
+### Screenshots are missing
+
+Make sure the host app is enabled in:
+
+- `System Settings > Privacy & Security > Screen Recording`
+
+Then restart the host app.
+
+### `npm run smoke` fails on `get_app_state`
+
+Try again with an app that is currently open and visible:
+
+```bash
+npm run smoke -- com.apple.calculator
+```
+
+or:
+
+```bash
+npm run smoke -- TextEdit
+```
+
+### Pointer actions work but do not feel fully background-safe
+
+That is expected.
+
+- AX-backed actions like `set_value` and some `perform_secondary_action` cases can stay background-first
+- pointer and keyboard actions are still best-effort restore, not guaranteed true background control across all apps
+
+## Publish As Its Own Repo
+
+Recommended standalone repo name:
+
+- `mac-computer-use`
+
+Recommended publish flow:
+
+1. Copy this directory into its own repo root
+2. Keep the existing docs:
+   - `README.md`
+   - `SPECS.md`
+   - `RESULT_SCHEMA.md`
+   - `COMPARE.md`
+   - `NOTES.md`
+3. Commit without:
+   - `node_modules`
+   - `.swift-cache`
+   - `.swift-home`
+4. Push as an unsigned macOS alpha for technical users
+
+## Known Good Validation Areas
+
+This clone has already been exercised against:
+
+- Calculator
+- TextEdit
+- Google Chrome
+
+including:
+
+- background AX press
+- focus-restored click
+- focus-restored scroll
+- settable text mutation
+- screenshot-returning post-action state
+
+## Roadmap
+
+Likely next steps:
+
+- signed helper app packaging
+- notarization
+- cleaner permission onboarding
+- richer `list_apps` metadata
+- tighter parity for text formatting and localization
