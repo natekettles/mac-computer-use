@@ -4,14 +4,6 @@ A macOS MCP clone of Codex `@Computer Use`, built to make the same tool interfac
 
 This project reproduces the Codex Computer Use tool surface with a Node MCP server and a native Swift helper so any MCP client that supports local `stdio` servers can use a similar interface on macOS.
 
-Current status:
-
-- macOS only
-- unsigned alpha
-- installable from source
-- real native behavior for all 9 observed tools
-- best experience on a machine where the host app already has `Accessibility` and `Screen Recording` permissions
-
 ## Requirements
 
 - macOS
