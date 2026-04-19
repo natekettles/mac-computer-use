@@ -113,7 +113,11 @@ export function normalizeObservedError(toolName: ComputerUseToolName, message: s
     return createErrorResult(toolName, "app_not_found", message);
   }
 
-  if (message.includes("invalid element ID")) {
+  if (
+    message.includes("invalid element ID") ||
+    message.includes("invalidElementID") ||
+    message.includes("no longer valid")
+  ) {
     return createErrorResult(toolName, "invalid_element", message);
   }
 

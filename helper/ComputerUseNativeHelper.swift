@@ -302,6 +302,15 @@ struct WindowEntry {
   let bounds: CGRect
 }
 
+struct AppMetadata {
+  let path: String
+  let bundleId: String?
+  let displayName: String
+  let lastUsed: Date?
+  let lastUsedRaw: String?
+  let useCount: Int?
+}
+
 struct Request: Decodable {
   let id: String
   let method: String
@@ -495,8 +504,142 @@ func runningApp(for pid: pid_t) -> NSRunningApplication? {
   NSRunningApplication(processIdentifier: pid)
 }
 
+func shell(_ launchPath: String, _ arguments: [String]) -> String? {
+  let process = Process()
+  process.executableURL = URL(fileURLWithPath: launchPath)
+  process.arguments = arguments
+
+  let stdout = Pipe()
+  process.standardOutput = stdout
+  process.standardError = Pipe()
+
+  do {
+    try process.run()
+    process.waitUntilExit()
+    guard process.terminationStatus == 0 else {
+      return nil
+    }
+
+    let data = stdout.fileHandleForReading.readDataToEndOfFile()
+    return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+  } catch {
+    return nil
+  }
+}
+
 func appDisplayName(_ app: NSRunningApplication) -> String {
   app.localizedName ?? app.bundleIdentifier ?? "Unknown App"
+}
+
+func installedApplicationPaths() -> [String] {
+  let fileManager = FileManager.default
+  let roots = [
+    "/Applications",
+    "/System/Applications",
+    "/System/Applications/Utilities",
+    "\(NSHomeDirectory())/Applications",
+  ]
+
+  var paths = Set<String>()
+  for app in NSWorkspace.shared.runningApplications {
+    if let bundlePath = app.bundleURL?.path, bundlePath.hasSuffix(".app") {
+      paths.insert(bundlePath)
+    }
+  }
+
+  for root in roots {
+    guard let enumerator = fileManager.enumerator(
+      at: URL(fileURLWithPath: root),
+      includingPropertiesForKeys: [.isDirectoryKey],
+      options: [.skipsHiddenFiles]
+    ) else {
+      continue
+    }
+
+    while let url = enumerator.nextObject() as? URL {
+      if url.pathExtension == "app" {
+        paths.insert(url.path)
+        enumerator.skipDescendants()
+      }
+    }
+  }
+
+  return Array(paths)
+}
+
+func mdlsMetadata(for appPath: String) -> AppMetadata? {
+  guard let output = shell(
+    "/usr/bin/mdls",
+    [
+      "-raw",
+      "-name", "kMDItemCFBundleIdentifier",
+      "-name", "kMDItemDisplayName",
+      "-name", "kMDItemLastUsedDate",
+      "-name", "kMDItemUseCount",
+      appPath,
+    ]
+  ) else {
+    return nil
+  }
+
+  let lines = output
+    .split(omittingEmptySubsequences: false, whereSeparator: { $0 == "\n" || $0 == "\0" })
+    .map(String.init)
+  guard lines.count >= 4 else {
+    return nil
+  }
+
+  func normalizedString(_ raw: String) -> String? {
+    let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard trimmed != "(null)", trimmed != "null", !trimmed.isEmpty else {
+      return nil
+    }
+    if trimmed.hasPrefix("\""), trimmed.hasSuffix("\""), trimmed.count >= 2 {
+      return String(trimmed.dropFirst().dropLast())
+    }
+    return trimmed
+  }
+
+  let formatter = DateFormatter()
+  formatter.locale = Locale(identifier: "en_US_POSIX")
+  formatter.dateFormat = "yyyy-MM-dd HH:mm:ss Z"
+
+  let bundleId = normalizedString(lines[0])
+  let displayName = normalizedString(lines[1]) ?? URL(fileURLWithPath: appPath).deletingPathExtension().lastPathComponent
+  let lastUsedRaw = normalizedString(lines[2])
+  let lastUsed = lastUsedRaw.flatMap { formatter.date(from: $0) }
+  let useCount = normalizedString(lines[3]).flatMap(Int.init)
+
+  return AppMetadata(
+    path: appPath,
+    bundleId: bundleId,
+    displayName: displayName,
+    lastUsed: lastUsed,
+    lastUsedRaw: lastUsedRaw,
+    useCount: useCount
+  )
+}
+
+func appMetadataIndex() -> [String: AppMetadata] {
+  var byBundleId: [String: AppMetadata] = [:]
+
+  for path in installedApplicationPaths() {
+    guard let metadata = mdlsMetadata(for: path), let bundleId = metadata.bundleId else {
+      continue
+    }
+
+    if let existing = byBundleId[bundleId] {
+      let existingScore = (existing.lastUsed?.timeIntervalSince1970 ?? 0) + Double(existing.useCount ?? 0)
+      let metadataScore = (metadata.lastUsed?.timeIntervalSince1970 ?? 0) + Double(metadata.useCount ?? 0)
+      if metadataScore > existingScore {
+        byBundleId[bundleId] = metadata
+      }
+    } else {
+      byBundleId[bundleId] = metadata
+    }
+  }
+
+  return byBundleId
 }
 
 func appIdentityKey(_ app: NSRunningApplication) -> String {
@@ -584,6 +727,7 @@ func isLikelyUserFacingApp(_ app: NSRunningApplication, visiblePIDs: Set<pid_t>,
 func listAppsResult() -> ResultPayload {
   let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
   let visiblePIDs = Set(windowEntries().map(\.pid))
+  let metadataByBundleId = appMetadataIndex()
   var uniqueApps: [String: NSRunningApplication] = [:]
 
   for app in NSWorkspace.shared.runningApplications {
@@ -607,7 +751,7 @@ func listAppsResult() -> ResultPayload {
     }
   }
 
-  let apps = Array(uniqueApps.values)
+  var appObjects: [[String: JSONValue]] = Array(uniqueApps.values)
     .sorted {
       let leftScore = appScore($0, visiblePIDs: visiblePIDs, frontmostPID: frontmostPID)
       let rightScore = appScore($1, visiblePIDs: visiblePIDs, frontmostPID: frontmostPID)
@@ -619,15 +763,100 @@ func listAppsResult() -> ResultPayload {
       return leftName.localizedCaseInsensitiveCompare(rightName) == .orderedAscending
     }
     .map { app in
-      JSONValue.object([
-        "name": .string(appDisplayName(app)),
+      let metadata = app.bundleIdentifier.flatMap { metadataByBundleId[$0] }
+      var object: [String: JSONValue] = [
+        "name": .string(metadata?.displayName ?? appDisplayName(app)),
         "bundleId": app.bundleIdentifier.map(JSONValue.string) ?? .null,
         "pid": .number(Double(app.processIdentifier)),
         "running": .bool(true),
         "frontmost": .bool(app.processIdentifier == frontmostPID),
         "visible": .bool(visiblePIDs.contains(app.processIdentifier)),
-      ])
+      ]
+      if let lastUsedRaw = metadata?.lastUsedRaw {
+        object["lastUsed"] = .string(lastUsedRaw)
+      }
+      if let useCount = metadata?.useCount {
+        object["uses"] = .number(Double(useCount))
+      }
+      return object
     }
+
+  let knownBundleIds = Set(appObjects.compactMap { object -> String? in
+    if case .string(let bundleId)? = object["bundleId"] {
+      return bundleId
+    }
+    return nil
+  })
+
+  let recentNonRunning = metadataByBundleId.values
+    .filter { metadata in
+      guard let bundleId = metadata.bundleId, metadata.lastUsed != nil else {
+        return false
+      }
+      return !knownBundleIds.contains(bundleId)
+    }
+    .sorted {
+      if $0.lastUsed != $1.lastUsed {
+        return ($0.lastUsed ?? .distantPast) > ($1.lastUsed ?? .distantPast)
+      }
+      return ($0.useCount ?? 0) > ($1.useCount ?? 0)
+    }
+    .prefix(20)
+
+  for metadata in recentNonRunning {
+    var object: [String: JSONValue] = [
+      "name": .string(metadata.displayName),
+      "bundleId": metadata.bundleId.map(JSONValue.string) ?? .null,
+      "running": .bool(false),
+      "frontmost": .bool(false),
+      "visible": .bool(false),
+    ]
+    if let lastUsedRaw = metadata.lastUsedRaw {
+      object["lastUsed"] = .string(lastUsedRaw)
+    }
+    if let useCount = metadata.useCount {
+      object["uses"] = .number(Double(useCount))
+    }
+    appObjects.append(object)
+  }
+
+  let apps = appObjects
+    .sorted { left, right in
+      let leftRunning = if case .bool(let value)? = left["running"] { value } else { false }
+      let rightRunning = if case .bool(let value)? = right["running"] { value } else { false }
+      if leftRunning != rightRunning {
+        return leftRunning && !rightRunning
+      }
+
+      let leftFrontmost = if case .bool(let value)? = left["frontmost"] { value } else { false }
+      let rightFrontmost = if case .bool(let value)? = right["frontmost"] { value } else { false }
+      if leftFrontmost != rightFrontmost {
+        return leftFrontmost && !rightFrontmost
+      }
+
+      let leftVisible = if case .bool(let value)? = left["visible"] { value } else { false }
+      let rightVisible = if case .bool(let value)? = right["visible"] { value } else { false }
+      if leftVisible != rightVisible {
+        return leftVisible && !rightVisible
+      }
+
+      let leftLastUsed = left["lastUsed"].flatMap { if case .string(let value) = $0 { value } else { nil } } ?? ""
+      let rightLastUsed = right["lastUsed"].flatMap { if case .string(let value) = $0 { value } else { nil } } ?? ""
+      if leftLastUsed != rightLastUsed {
+        return leftLastUsed > rightLastUsed
+      }
+
+      let leftUses = left["uses"].flatMap { if case .number(let value) = $0 { value } else { nil } } ?? 0
+      let rightUses = right["uses"].flatMap { if case .number(let value) = $0 { value } else { nil } } ?? 0
+      if leftUses != rightUses {
+        return leftUses > rightUses
+      }
+
+      let leftName = left["name"].flatMap { if case .string(let value) = $0 { value } else { nil } } ?? ""
+      let rightName = right["name"].flatMap { if case .string(let value) = $0 { value } else { nil } } ?? ""
+      return leftName.localizedCaseInsensitiveCompare(rightName) == .orderedAscending
+    }
+    .map(JSONValue.object)
 
   let rawText = apps.compactMap { value -> String? in
     guard case .object(let object) = value else { return nil }
@@ -638,7 +867,17 @@ func listAppsResult() -> ResultPayload {
     } else {
       bundleText = "<unknown>"
     }
-    return "\(name) — \(bundleText) [running]"
+    var flags: [String] = []
+    if case .bool(true)? = object["running"] {
+      flags.append("running")
+    }
+    if case .string(let lastUsed)? = object["lastUsed"] {
+      flags.append("last-used=\(String(lastUsed.prefix(10)))")
+    }
+    if case .number(let uses)? = object["uses"] {
+      flags.append("uses=\(Int(uses))")
+    }
+    return "\(name) — \(bundleText) [\(flags.joined(separator: ", "))]"
   }.joined(separator: "\n")
 
   return ResultPayload(
@@ -648,9 +887,7 @@ func listAppsResult() -> ResultPayload {
     snapshot: nil,
     artifacts: nil,
     data: ["apps": .array(apps)],
-    warnings: [
-      "Native helper currently returns running applications only; recent app history, last-used dates, and usage counts are not implemented yet."
-    ],
+    warnings: [],
     meta: MetaPayload(observedShape: "text", rawText: rawText),
     error: nil
   )
@@ -739,6 +976,10 @@ func axChildren(_ element: AXUIElement) -> [AXUIElement] {
   (axValue(element, kAXChildrenAttribute as String) as? [AXUIElement]) ?? []
 }
 
+func axParent(_ element: AXUIElement) -> AXUIElement? {
+  axElementValue(element, kAXParentAttribute as String)
+}
+
 func axActions(_ element: AXUIElement) -> [String] {
   var actions: CFArray?
   let error = AXUIElementCopyActionNames(element, &actions)
@@ -791,26 +1032,38 @@ func axFocusedElement(for app: NSRunningApplication) -> AXUIElement? {
 
 func displayRoleName(_ role: String?) -> String {
   switch role {
-  case kAXWindowRole as String:
-    return "standard window"
-  case kAXGroupRole as String:
-    return "group"
-  case kAXSplitGroupRole as String:
-    return "split group"
-  case kAXSplitterRole as String:
-    return "splitter"
-  case kAXScrollAreaRole as String:
-    return "scroll area"
-  case kAXStaticTextRole as String:
-    return "text"
-  case kAXButtonRole as String:
-    return "button"
-  case kAXMenuButtonRole as String:
-    return "menu button"
-  case kAXMenuBarRole as String:
+  case kAXWindowRole:
+    return "fenêtre standard"
+  case kAXGroupRole:
+    return "container"
+  case kAXSplitGroupRole:
+    return "diviser groupe"
+  case kAXSplitterRole:
+    return "diviseur"
+  case kAXScrollAreaRole:
+    return "zone de défilement"
+  case kAXStaticTextRole:
+    return "texte"
+  case kAXButtonRole:
+    return "bouton"
+  case kAXMenuButtonRole:
+    return "bouton de menu"
+  case kAXMenuBarRole:
     return "menu bar"
-  case kAXTextAreaRole as String:
-    return "text area"
+  case kAXToolbarRole:
+    return "barre d’outils"
+  case "AXWebArea":
+    return "Contenu HTML"
+  case "AXTabGroup":
+    return "groupe d’onglet"
+  case "AXRadioButton":
+    return "onglet"
+  case "AXTextField":
+    return "champ de texte"
+  case kAXTextAreaRole:
+    return "zone de texte"
+  case "AXPopUpButton":
+    return "popupbutton"
   default:
     let raw = role ?? "element"
     return raw.replacingOccurrences(of: "AX", with: "").lowercased()
@@ -819,17 +1072,17 @@ func displayRoleName(_ role: String?) -> String {
 
 func displayActionName(_ action: String) -> String? {
   switch action {
-  case kAXRaiseAction as String:
+  case kAXRaiseAction:
     return "Raise"
-  case kAXPressAction as String:
+  case kAXPressAction:
     return nil
-  case kAXConfirmAction as String:
+  case kAXConfirmAction:
     return "Confirm"
-  case kAXCancelAction as String:
+  case kAXCancelAction:
     return "Cancel"
-  case kAXShowMenuAction as String:
+  case kAXShowMenuAction:
     return "ShowMenu"
-  case kAXPickAction as String:
+  case kAXPickAction:
     return "Pick"
   default:
     if action.hasPrefix("AXScroll") {
@@ -839,6 +1092,46 @@ func displayActionName(_ action: String) -> String? {
       return String(action.dropFirst(2))
     }
     return action
+  }
+}
+
+func hasMeaningfulPresentationMetadata(_ element: AXUIElement) -> Bool {
+  let title = axString(element, kAXTitleAttribute as String)
+  let description = axString(element, kAXDescriptionAttribute as String)
+  let help = axString(element, kAXHelpAttribute as String)
+  let value = formattedAXValue(axValue(element, kAXValueAttribute as String))
+  let identifier = axString(element, kAXIdentifierAttribute as String)
+  let focused = axBool(element, kAXFocusedAttribute as String) == true
+
+  if !(title?.isEmpty ?? true) || !(description?.isEmpty ?? true) || !(help?.isEmpty ?? true) || !(value?.isEmpty ?? true) || focused {
+    return true
+  }
+
+  guard let identifier else {
+    return false
+  }
+
+  let trimmed = identifier.trimmingCharacters(in: .whitespacesAndNewlines)
+  guard !trimmed.isEmpty else {
+    return false
+  }
+
+  let lowered = trimmed.lowercased()
+  if lowered.hasPrefix("group") || lowered.hasPrefix("toolbar") || lowered.hasPrefix("scrollarea") {
+    return false
+  }
+
+  return true
+}
+
+func hasMeaningfulSecondaryAction(_ element: AXUIElement) -> Bool {
+  axActions(element).contains { action in
+    switch action {
+    case kAXShowMenuAction, kAXRaiseAction:
+      return false
+    default:
+      return !action.hasPrefix("AXScroll")
+    }
   }
 }
 
@@ -866,9 +1159,9 @@ func axElementSummary(_ element: AXUIElement, semanticID: String) -> String {
   let actions = axActions(element).compactMap(displayActionName(_:))
 
   var line = displayRoleName(role)
-  if let title, !title.isEmpty, role == kAXWindowRole as String {
+  if let title, !title.isEmpty, role == kAXWindowRole {
     line += " \(title)"
-  } else if role == kAXStaticTextRole as String, let renderedValue = formattedAXValue(value) {
+  } else if role == kAXStaticTextRole, let renderedValue = formattedAXValue(value) {
     line += " \(renderedValue)"
   }
 
@@ -876,7 +1169,7 @@ func axElementSummary(_ element: AXUIElement, semanticID: String) -> String {
   if let description, !description.isEmpty, description != title {
     details.append("Description: \(description)")
   }
-  if role != kAXStaticTextRole as String, let renderedValue = formattedAXValue(value) {
+  if role != kAXStaticTextRole, let renderedValue = formattedAXValue(value) {
     details.append(renderedValue)
   }
 
@@ -887,7 +1180,7 @@ func axElementSummary(_ element: AXUIElement, semanticID: String) -> String {
   if settable {
     flags.append("settable")
   }
-  if focused && role != kAXTextAreaRole as String {
+  if focused && role != kAXTextAreaRole {
     flags.append("focused")
   }
   if !flags.isEmpty {
@@ -940,7 +1233,7 @@ func semanticIDComponent(from rawValue: String?) -> String? {
 
 func baseSemanticID(for element: AXUIElement) -> String {
   let role = axString(element, kAXRoleAttribute as String) ?? "AXElement"
-  if role == kAXWindowRole as String {
+  if role == kAXWindowRole {
     return "main"
   }
 
@@ -974,22 +1267,81 @@ func nextSemanticID(for element: AXUIElement, usedIDs: inout [String: Int]) -> S
   return nextCount == 1 ? base : "\(base)\(nextCount)"
 }
 
-func buildAXSnapshot(for app: NSRunningApplication) -> AXSnapshotData {
-  let root = axRootElement(for: app)
+func shouldPresentElement(_ element: AXUIElement) -> Bool {
+  let role = axString(element, kAXRoleAttribute as String) ?? ""
+  let childCount = axChildren(element).count
+
+  if role == kAXGroupRole {
+    if !hasMeaningfulPresentationMetadata(element) && !hasMeaningfulSecondaryAction(element) {
+      return false
+    }
+    if childCount == 1 && !hasMeaningfulSecondaryAction(element) {
+      return false
+    }
+  }
+
+  if role == kAXToolbarRole {
+    return hasMeaningfulPresentationMetadata(element) || childCount > 0
+  }
+
+  if role == kAXSplitterRole {
+    return hasMeaningfulPresentationMetadata(element)
+  }
+
+  if role == kAXScrollAreaRole {
+    return hasMeaningfulPresentationMetadata(element) || childCount > 0
+  }
+
+  return true
+}
+
+func walkPresentedAXTree(
+  root: AXUIElement,
+  maxDepth: Int = 12,
+  maxPresentedElements: Int = 400,
+  maxChildrenPerNode: Int = 120,
+  visitor: (_ element: AXUIElement, _ index: String, _ semanticID: String, _ depth: Int) -> Void
+) -> [String] {
   var nextIndex = 0
   var usedIDs: [String: Int] = [:]
-  var elements: [ElementPayload] = []
-  var lines: [String] = []
   var warnings: [String] = []
 
-  func walk(_ element: AXUIElement, depth: Int) {
-    if nextIndex > 120 || depth > 8 {
+  func walk(_ element: AXUIElement, depth: Int, presentedDepth: Int) {
+    if nextIndex >= maxPresentedElements || depth > maxDepth {
       return
     }
 
-    let index = "\(nextIndex)"
-    nextIndex += 1
-    let semanticID = nextSemanticID(for: element, usedIDs: &usedIDs)
+    let children = axChildren(element)
+    if children.count > maxChildrenPerNode {
+      warnings.append("Accessibility tree truncated for large child lists.")
+    }
+
+    let present = shouldPresentElement(element)
+    let currentDepth = present ? presentedDepth : max(presentedDepth - 1, 0)
+    if present {
+      let index = "\(nextIndex)"
+      nextIndex += 1
+      let semanticID = nextSemanticID(for: element, usedIDs: &usedIDs)
+      visitor(element, index, semanticID, currentDepth)
+    }
+
+    for child in children.prefix(maxChildrenPerNode) {
+      walk(child, depth: depth + 1, presentedDepth: currentDepth + 1)
+      if nextIndex >= maxPresentedElements {
+        return
+      }
+    }
+  }
+
+  walk(root, depth: 0, presentedDepth: 0)
+  return warnings
+}
+
+func buildAXSnapshot(for app: NSRunningApplication) -> AXSnapshotData {
+  let root = axRootElement(for: app)
+  var elements: [ElementPayload] = []
+  var lines: [String] = []
+  let warnings = walkPresentedAXTree(root: root) { element, index, semanticID, depth in
     let value = axValue(element, kAXValueAttribute as String)
     let normalizedValue: JSONValue?
     if let stringValue = value as? String {
@@ -1020,21 +1372,14 @@ func buildAXSnapshot(for app: NSRunningApplication) -> AXSnapshotData {
       )
     )
     lines.append("\(String(repeating: "\t", count: max(depth, 0)))\(index) \(axElementSummary(element, semanticID: semanticID))")
-
-    let children = axChildren(element)
-    if children.count > 40 {
-      warnings.append("Accessibility tree truncated for large child lists.")
-    }
-
-    for child in children.prefix(40) {
-      walk(child, depth: depth + 1)
-    }
   }
 
-  walk(root, depth: 0)
-
   if lines.isEmpty {
-    warnings.append("Accessibility tree extraction returned no visible elements.")
+    return AXSnapshotData(
+      treeText: "",
+      elements: elements,
+      warnings: warnings + ["Accessibility tree extraction returned no visible elements."]
+    )
   }
 
   return AXSnapshotData(treeText: lines.joined(separator: "\n"), elements: elements, warnings: warnings)
@@ -1042,33 +1387,79 @@ func buildAXSnapshot(for app: NSRunningApplication) -> AXSnapshotData {
 
 func axElementByIndex(for app: NSRunningApplication, index targetIndex: String) -> AXUIElement? {
   let root = axRootElement(for: app)
-  var nextIndex = 0
-  var usedIDs: [String: Int] = [:]
   var found: AXUIElement?
-
-  func walk(_ element: AXUIElement, depth: Int) {
-    if found != nil || nextIndex > 120 || depth > 8 {
-      return
-    }
-
-    let index = "\(nextIndex)"
-    nextIndex += 1
-    let semanticID = nextSemanticID(for: element, usedIDs: &usedIDs)
-    if index == targetIndex || semanticID.lowercased() == targetIndex.lowercased() {
+  _ = walkPresentedAXTree(root: root) { element, index, _, _ in
+    if found == nil && index == targetIndex {
       found = element
-      return
     }
+  }
+  return found
+}
 
-    for child in axChildren(element).prefix(40) {
-      walk(child, depth: depth + 1)
-      if found != nil {
-        return
-      }
+func centerPoint(for bounds: BoundsPayload) -> CGPoint? {
+  guard bounds.width > 0, bounds.height > 0 else {
+    return nil
+  }
+  return CGPoint(x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2)
+}
+
+func axBoundsForInteraction(_ element: AXUIElement) -> BoundsPayload? {
+  if let bounds = axBounds(element), bounds.width > 0, bounds.height > 0 {
+    return bounds
+  }
+
+  for child in axChildren(element).prefix(20) {
+    if let bounds = axBoundsForInteraction(child) {
+      return bounds
     }
   }
 
-  walk(root, depth: 0)
-  return found
+  return nil
+}
+
+func resolveElementTarget(
+  appRef: String,
+  elementIndex: String
+) -> (app: NSRunningApplication, element: AXUIElement, bounds: BoundsPayload, point: CGPoint)? {
+  guard let app = resolveApp(appRef) else {
+    return nil
+  }
+  guard let element = axElementByIndex(for: app, index: elementIndex),
+    let bounds = axBoundsForInteraction(element),
+    let point = centerPoint(for: bounds)
+  else {
+    return nil
+  }
+  return (app: app, element: element, bounds: bounds, point: point)
+}
+
+func isScrollableRole(_ role: String?) -> Bool {
+  switch role {
+  case kAXScrollAreaRole, "AXWebArea":
+    return true
+  default:
+    return false
+  }
+}
+
+func scrollInteractionPoint(for element: AXUIElement) -> CGPoint? {
+  var current: AXUIElement? = element
+  var depth = 0
+
+  while let candidate = current, depth < 12 {
+    let role = axString(candidate, kAXRoleAttribute as String)
+    if isScrollableRole(role),
+      let bounds = axBoundsForInteraction(candidate),
+      let point = centerPoint(for: bounds)
+    {
+      return point
+    }
+
+    current = axParent(candidate)
+    depth += 1
+  }
+
+  return nil
 }
 
 func boundsContainPoint(_ bounds: BoundsPayload, point: CGPoint) -> Bool {
@@ -1234,8 +1625,9 @@ func getAppStateResult(appRef: String) -> ResultPayload {
   let axSnapshot = app.map(buildAXSnapshot)
   let bodyText = axSnapshot?.treeText ?? ""
   let treeText = bodyText.isEmpty
-    ? "App=\(bundleId)\nWindow: \"\(title ?? "<unknown>")\", App: \(appName)."
-    : "App=\(bundleId)\nWindow: \"\(title ?? "<unknown>")\", App: \(appName).\n\(bodyText)"
+    ? "App=\(bundleId) (pid \(entry.pid))\nWindow: \"\(title ?? "<unknown>")\", App: \(appName)."
+    : "App=\(bundleId) (pid \(entry.pid))\nWindow: \"\(title ?? "<unknown>")\", App: \(appName).\n\(bodyText)"
+  let rawText = "Computer Use state (CUA App Version: 750)\n<app_state>\n\(treeText)\n\n</app_state>"
 
   return ResultPayload(
     ok: true,
@@ -1249,7 +1641,7 @@ func getAppStateResult(appRef: String) -> ResultPayload {
       axSnapshot?.warnings.first,
       screenshot == nil ? "Native helper screenshot capture is not implemented yet." : nil
     ].compactMap { $0 },
-    meta: MetaPayload(observedShape: "state+image", rawText: treeText),
+    meta: MetaPayload(observedShape: "state+image", rawText: rawText),
     error: nil
   )
 }
@@ -1373,9 +1765,6 @@ func clickResult(params: [String: JSONValue]) -> ResultPayload {
   guard case .string(let appRef)? = params["app"] else {
     return makeErrorResult(toolName: "click", code: "internal_error", message: "Missing app parameter")
   }
-  guard case .number(let xValue)? = params["x"], case .number(let yValue)? = params["y"] else {
-    return makeErrorResult(toolName: "click", code: "unsupported_action", message: "Native helper currently supports coordinate clicks only.")
-  }
 
   let clickCount: Int
   if case .number(let rawCount)? = params["click_count"] {
@@ -1392,11 +1781,30 @@ func clickResult(params: [String: JSONValue]) -> ResultPayload {
   }
 
   let button = mouseButton(from: buttonName)
-  guard let location = screenPoint(forScreenshotPoint: CGPoint(x: xValue, y: yValue), appRef: appRef) else {
-    return makeErrorResult(toolName: "click", code: "app_not_found", message: "appNotFound(\"\(appRef)\")")
+
+  let location: CGPoint
+  let semanticElement: AXUIElement?
+  if case .string(let elementIndex)? = params["element_index"] {
+    guard let target = resolveElementTarget(appRef: appRef, elementIndex: elementIndex) else {
+      return makeErrorResult(toolName: "click", code: "invalid_element", message: "\(elementIndex) is an invalid element ID")
+    }
+    location = target.point
+    semanticElement = target.element
+  } else if case .number(let xValue)? = params["x"], case .number(let yValue)? = params["y"] {
+    guard let resolvedLocation = screenPoint(forScreenshotPoint: CGPoint(x: xValue, y: yValue), appRef: appRef) else {
+      return makeErrorResult(toolName: "click", code: "app_not_found", message: "appNotFound(\"\(appRef)\")")
+    }
+    location = resolvedLocation
+    semanticElement = nil
+  } else {
+    return makeErrorResult(
+      toolName: "click",
+      code: "unsupported_action",
+      message: "Click requires element_index or x/y coordinates."
+    )
   }
 
-  let canUseSemanticClick = button == .left && clickCount == 1
+  let canUseSemanticClick = button == .left && clickCount == 1 && semanticElement != nil
   var success = false
 
   if canUseSemanticClick {
@@ -1835,6 +2243,9 @@ func scrollResult(params: [String: JSONValue]) -> ResultPayload {
   guard case .string(let appRef)? = params["app"] else {
     return makeErrorResult(toolName: "scroll", code: "internal_error", message: "Missing app parameter")
   }
+  guard case .string(let elementIndex)? = params["element_index"] else {
+    return makeErrorResult(toolName: "scroll", code: "internal_error", message: "Missing element_index parameter")
+  }
   guard case .string(let direction)? = params["direction"] else {
     return makeErrorResult(toolName: "scroll", code: "internal_error", message: "Missing direction parameter")
   }
@@ -1846,13 +2257,18 @@ func scrollResult(params: [String: JSONValue]) -> ResultPayload {
     pages = 1
   }
 
-  guard let entry = (resolveApp(appRef).flatMap { windowInfo(for: $0.processIdentifier) }) ?? resolveWindowEntry(appRef) else {
-    return makeErrorResult(toolName: "scroll", code: "app_not_found", message: "appNotFound(\"\(appRef)\")")
+  guard let target = resolveElementTarget(appRef: appRef, elementIndex: elementIndex) else {
+    return makeErrorResult(toolName: "scroll", code: "invalid_element", message: "\(elementIndex) is an invalid element ID")
+  }
+
+  guard let scrollPoint = scrollInteractionPoint(for: target.element) else {
+    usleep(120_000)
+    return getAppStateResult(appRef: appRef)
   }
 
   let delta = 480 * pages
   let success = withActivatedApp(appRef: appRef) {
-    let center = CGPoint(x: entry.bounds.midX, y: entry.bounds.midY)
+    let center = scrollPoint
     OverlayCursorController.shared.animate(to: center, duration: 0.14)
     guard let mouseMove = CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: center, mouseButton: .left) else {
       return false

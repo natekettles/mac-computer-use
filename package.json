@@ -1,6 +1,6 @@
 {
   "name": "mac-computer-use",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Unsigned macOS Computer Use MCP server with a native Swift helper.",
   "type": "module",
   "bin": {
