@@ -443,6 +443,8 @@ Recent compatibility improvement:
   - dedupes multiple instances of the same bundle
   - keeps frontmost and visible apps prioritized
   - includes a `visible` flag in structured output
+  - includes recent non-running apps when Spotlight metadata is available
+  - includes `lastUsed` and `uses`
 
 Live validation in the current shell-hosted path showed:
 
@@ -451,9 +453,9 @@ Live validation in the current shell-hosted path showed:
 
 Remaining gap:
 
-- still no recent-app history
-- still no `last-used`
-- still no `uses` count
+- bundled ordering still differs
+- bundled app-name normalization still differs in some cases
+- the exact recent-app set still differs from bundled output
 
 ## Open Reverse-Engineering Questions
 

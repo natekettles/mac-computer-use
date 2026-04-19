@@ -131,7 +131,7 @@ Under the hood:
 
 ### `list_apps`
 
-Returns a user-facing inventory of currently running apps.
+Returns a user-facing inventory of running apps plus recent non-running apps when metadata is available.
 
 Structured result includes:
 
@@ -141,6 +141,8 @@ Structured result includes:
 - `running`
 - `frontmost`
 - `visible`
+- `lastUsed`
+- `uses`
 
 ### `get_app_state`
 
@@ -223,7 +225,6 @@ What already works:
 Current limitations:
 
 - unsigned packaging, so this is not a mainstream one-click install yet
-- `list_apps` does not include recent non-running apps, `last-used`, or `uses`
 - exact bundled text/localization parity is incomplete
 - background semantics are strongest for AX-backed actions; pointer/keyboard actions are still best-effort restore, not guaranteed true background control
 
@@ -318,5 +319,5 @@ Likely next steps:
 - signed helper app packaging
 - notarization
 - cleaner permission onboarding
-- richer `list_apps` metadata
+- tighter `list_apps` ordering and naming parity
 - tighter parity for text formatting and localization

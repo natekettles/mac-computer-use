@@ -90,7 +90,7 @@ For successful native action paths, the clone returns refreshed state and image 
 
 ## Current Gaps vs Bundled Codex Computer Use
 
-### 1. `list_apps` is much closer, but still behind
+### 1. `list_apps` metadata parity is now strong, but ordering parity still differs
 
 Bundled plugin output is richer:
 
@@ -102,16 +102,16 @@ Bundled plugin output is richer:
 Clone output after today’s helper fix:
 
 - returned `ok: true`
-- now returns a filtered 17-app user-facing inventory in this shell-hosted path
+- now returns a filtered user-facing inventory with running apps first and recent non-running apps appended
 - dedupes multiple instances of the same bundle
-- now includes a useful `visible` flag
-- warning: `Native helper currently returns running applications only; recent app history, last-used dates, and usage counts are not implemented yet.`
+- now includes `visible`, `lastUsed`, and `uses`
+- no longer emits the old running-only warning
 
-The remaining gap is quality, not basic reliability:
+The remaining gap is now mostly quality:
 
-- the clone still does not provide recent-app history
-- the clone still does not provide usage metadata
-- the clone still does not include `last-used`
+- ordering still differs from bundled output
+- some app-name normalization still differs
+- the exact inclusion/exclusion set for recents still differs across apps
 
 ### 2. `get_app_state` semantics are closer, but still less polished
 
@@ -124,14 +124,14 @@ Bundled plugin on Calculator currently returns polished semantic output such as:
 
 Clone output is more raw:
 
-- element identity now includes clone-side semantic IDs like `main`, `AllClear`, and `StandardInputView`
-- action tools can now target either numeric `index` or semantic `id`
+- element identity now includes clone-side semantic IDs like `main`, `Delete`, and `StandardInputView`
+- `click` and `scroll` now use bundled-style numeric `element_index` targeting
 - action names are still AX-oriented in structured data like `AXRaise`
 - text rendering is now much closer on the human-facing side, for example:
-  - `0 standard window Calculette, ID: main, Secondary Actions: Raise`
-  - `9 button, Description: Supprimer, ID: Delete`
-  - `29 menu button, Description: calculator.fill, ID: CalculatorFill, Secondary Actions: ShowMenu`
-- but the clone still uses simpler English role labels and less polished phrasing than the bundled plugin
+  - `0 fenêtre standard Calculette, ID: main, Secondary Actions: Raise`
+  - `6 bouton, Description: Supprimer, ID: Delete`
+  - `25 bouton de menu, Description: calculator.fill, ID: CalculatorFill, Secondary Actions: ShowMenu`
+- but the clone still does not match bundled phrasing and localization exactly
 
 The clone is useful, but not yet interchangeable at the semantic level.
 
@@ -176,7 +176,7 @@ Remaining gap:
 The native helper has already shown two different realities:
 
 - in earlier unsandboxed validation runs, actions worked well
-- in today’s shell-hosted backend probes, `list_apps` returned no apps and `Press` failed while `Raise` still succeeded
+- shell-hosted probing historically exposed rough edges that bundled Computer Use does not show
 
 That means the clone is not yet operationally stable across launch contexts. The bundled plugin clearly is.
 
@@ -201,7 +201,7 @@ Today’s comparison says:
 Before adding new features, the highest-value polish items are:
 
 1. Filter and enrich `list_apps` so it looks more like user-facing app inventory and less like raw process inventory.
-2. Decide how aggressively to chase background semantics for pointer actions, which likely cannot be truly background-safe across all apps.
-3. Tune the overlay pointer further only if the current motion/look still feels materially off.
-4. Add richer compatibility mapping for action names and element identity across changing trees.
-5. Continue tightening semantic ID generation so clone IDs match bundled names more often across apps.
+2. Tighten `list_apps` ordering and naming normalization so it lands closer to bundled output.
+3. Decide how aggressively to chase background semantics for pointer actions, which likely cannot be truly background-safe across all apps.
+4. Tune the overlay pointer further only if the current motion/look still feels materially off.
+5. Add richer compatibility mapping for action names and element identity across changing trees.
