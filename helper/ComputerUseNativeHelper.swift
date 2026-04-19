@@ -4,7 +4,16 @@ import CoreGraphics
 import Foundation
 
 final class OverlayCursorView: NSView {
+  private let drawingInset = CGPoint(x: 6, y: 6)
+  private let scaleAnchor = CGPoint(x: 12, y: 27)
+
   var pulseAlpha: CGFloat = 0 {
+    didSet {
+      needsDisplay = true
+    }
+  }
+
+  var cursorScale: CGFloat = 1 {
     didSet {
       needsDisplay = true
     }
@@ -21,7 +30,14 @@ final class OverlayCursorView: NSView {
   override func draw(_ dirtyRect: NSRect) {
     super.draw(dirtyRect)
 
-    let pulseRect = NSRect(x: 2, y: 5, width: 28, height: 28)
+    NSGraphicsContext.saveGraphicsState()
+    let transform = NSAffineTransform()
+    transform.translateX(by: scaleAnchor.x, yBy: scaleAnchor.y)
+    transform.scale(by: cursorScale)
+    transform.translateX(by: -scaleAnchor.x, yBy: -scaleAnchor.y)
+    transform.concat()
+
+    let pulseRect = NSRect(x: 2 + drawingInset.x, y: 5 + drawingInset.y, width: 28, height: 28)
     if pulseAlpha > 0.01 {
       let pulse = NSBezierPath(ovalIn: pulseRect.insetBy(dx: -3, dy: -3))
       NSColor(calibratedRed: 1.0, green: 1.0, blue: 1.0, alpha: pulseAlpha * 0.18).setFill()
@@ -58,14 +74,16 @@ final class OverlayCursorView: NSView {
     arrow.lineJoinStyle = .round
     arrow.lineCapStyle = .round
     arrow.stroke()
+    NSGraphicsContext.restoreGraphicsState()
   }
 
   private func roundedPointerPath(inset: CGFloat) -> NSBezierPath {
     let path = NSBezierPath()
     let scale = (22.0 - (inset * 2.0)) / 39.0
-    let offset = inset
+    let offsetX = drawingInset.x + inset
+    let offsetY = drawingInset.y + inset
     func point(_ x: CGFloat, _ y: CGFloat) -> NSPoint {
-      NSPoint(x: offset + (x * scale), y: offset + ((39.0 - y) * scale))
+      NSPoint(x: offsetX + (x * scale), y: offsetY + ((39.0 - y) * scale))
     }
 
     path.move(to: point(6.5338, 33.7802))
@@ -102,7 +120,8 @@ final class OverlayCursorView: NSView {
 final class OverlayCursorController {
   static let shared = OverlayCursorController()
 
-  private let size = CGSize(width: 28, height: 26)
+  private let size = CGSize(width: 40, height: 38)
+  private let hotspot = CGPoint(x: 12, y: 27)
   private let idleHideDelay: TimeInterval = 1.5
   private let overlayQueue = DispatchQueue(label: "computer-use.overlay")
   private var window: NSWindow?
@@ -111,9 +130,17 @@ final class OverlayCursorController {
   }
   private var currentPoint: CGPoint?
   private var hideWorkItem: DispatchWorkItem?
+  private var targetWindowID: CGWindowID?
+  private var targetWindowLevel: NSWindow.Level = .normal
 
   private init() {
     NSApplication.shared.setActivationPolicy(.accessory)
+  }
+
+  func configure(for entry: WindowEntry?) {
+    targetWindowID = entry?.windowID
+    targetWindowLevel = .normal
+    window?.level = targetWindowLevel
   }
 
   func animate(to point: CGPoint, duration: TimeInterval = 0.16) {
@@ -145,8 +172,14 @@ final class OverlayCursorController {
   func move(to point: CGPoint) {
     cancelHide()
     let window = ensureWindow()
-    window.setFrameOrigin(NSPoint(x: point.x - 6, y: point.y - size.height + 5))
-    window.orderFrontRegardless()
+    window.level = targetWindowLevel
+    let appKitPoint = appKitPoint(fromDisplayPoint: point)
+    window.setFrameOrigin(NSPoint(x: appKitPoint.x - hotspot.x, y: appKitPoint.y - hotspot.y))
+    if let targetWindowID {
+      window.order(.above, relativeTo: Int(targetWindowID))
+    } else {
+      window.orderFront(nil)
+    }
     if window.alphaValue < 0.98 {
       NSAnimationContext.runAnimationGroup { context in
         context.duration = 0.12
@@ -174,19 +207,25 @@ final class OverlayCursorController {
   }
 
   func pulse() {
-    ensureWindow()
+    _ = ensureWindow()
     view?.pressed = true
     view?.pulseAlpha = 1
+    view?.cursorScale = 0.9
 
-    let steps = 5
+    let steps = 6
     for step in 1...steps {
       let progress = CGFloat(step) / CGFloat(steps)
+      let eased = progress < 0.5
+        ? 4 * progress * progress * progress
+        : 1 - pow(-2 * progress + 2, 3) / 2
       view?.pulseAlpha = 1 - progress
+      view?.cursorScale = 0.9 + (0.1 * eased)
       RunLoop.current.run(until: Date().addingTimeInterval(0.018))
     }
 
     view?.pressed = false
     view?.pulseAlpha = 0
+    view?.cursorScale = 1
   }
 
   private func show(at point: CGPoint) {
@@ -198,7 +237,7 @@ final class OverlayCursorController {
       return currentPoint
     }
 
-    let mouse = NSEvent.mouseLocation
+    let mouse = displayPoint(fromAppKitPoint: NSEvent.mouseLocation)
     let dx = target.x - mouse.x
     let dy = target.y - mouse.y
     let distance = sqrt((dx * dx) + (dy * dy))
@@ -230,13 +269,29 @@ final class OverlayCursorController {
     window.backgroundColor = .clear
     window.hasShadow = false
     window.ignoresMouseEvents = true
-    window.level = .screenSaver
+    window.level = targetWindowLevel
     window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
     window.alphaValue = 0
     window.contentView = OverlayCursorView(frame: rect)
     self.window = window
     return window
   }
+}
+
+func desktopFrame() -> CGRect {
+  NSScreen.screens.map(\.frame).reduce(into: CGRect.null) { result, frame in
+    result = result.union(frame)
+  }
+}
+
+func appKitPoint(fromDisplayPoint point: CGPoint) -> CGPoint {
+  let frame = desktopFrame()
+  return CGPoint(x: point.x, y: frame.maxY - point.y)
+}
+
+func displayPoint(fromAppKitPoint point: CGPoint) -> CGPoint {
+  let frame = desktopFrame()
+  return CGPoint(x: point.x, y: frame.maxY - point.y)
 }
 
 struct WindowEntry {
@@ -625,7 +680,28 @@ func resolveWindowEntry(_ ref: String) -> WindowEntry? {
 }
 
 func windowInfo(for pid: pid_t) -> WindowEntry? {
-  windowEntries().first(where: { $0.pid == pid })
+  windowEntries()
+    .filter { $0.pid == pid }
+    .max {
+      let leftArea = $0.bounds.width * $0.bounds.height
+      let rightArea = $1.bounds.width * $1.bounds.height
+      if leftArea == rightArea {
+        return $0.windowID < $1.windowID
+      }
+      return leftArea < rightArea
+    }
+}
+
+func resolvedWindowInfo(appRef: String) -> WindowEntry? {
+  (resolveApp(appRef).flatMap { windowInfo(for: $0.processIdentifier) }) ?? resolveWindowEntry(appRef)
+}
+
+func screenPoint(forScreenshotPoint point: CGPoint, appRef: String) -> CGPoint? {
+  guard let entry = resolvedWindowInfo(appRef: appRef) else {
+    return nil
+  }
+
+  return CGPoint(x: entry.bounds.origin.x + point.x, y: entry.bounds.origin.y + point.y)
 }
 
 func axValue(_ element: AXUIElement, _ attribute: String) -> CFTypeRef? {
@@ -703,6 +779,14 @@ func axRootElement(for app: NSRunningApplication) -> AXUIElement {
     return mainWindow
   }
   return appElement
+}
+
+func axFocusedElement(for app: NSRunningApplication) -> AXUIElement? {
+  let appElement = AXUIElementCreateApplication(app.processIdentifier)
+  if let focusedElement = axElementValue(appElement, kAXFocusedUIElementAttribute as String) {
+    return focusedElement
+  }
+  return nil
 }
 
 func displayRoleName(_ role: String?) -> String {
@@ -987,6 +1071,153 @@ func axElementByIndex(for app: NSRunningApplication, index targetIndex: String) 
   return found
 }
 
+func boundsContainPoint(_ bounds: BoundsPayload, point: CGPoint) -> Bool {
+  point.x >= bounds.x &&
+    point.x <= (bounds.x + bounds.width) &&
+    point.y >= bounds.y &&
+    point.y <= (bounds.y + bounds.height)
+}
+
+func axClickableElement(at point: CGPoint, for app: NSRunningApplication) -> AXUIElement? {
+  let root = axRootElement(for: app)
+  var bestMatch: (element: AXUIElement, area: CGFloat)?
+
+  func score(_ element: AXUIElement, bounds: BoundsPayload) -> CGFloat {
+    let actions = axActions(element)
+    guard actions.contains(kAXPressAction as String) || actions.contains(kAXPickAction as String) else {
+      return .greatestFiniteMagnitude
+    }
+    guard boundsContainPoint(bounds, point: point) else {
+      return .greatestFiniteMagnitude
+    }
+    return bounds.width * bounds.height
+  }
+
+  func walk(_ element: AXUIElement, depth: Int) {
+    if depth > 10 {
+      return
+    }
+
+    if let bounds = axBounds(element) {
+      let area = score(element, bounds: bounds)
+      if area.isFinite {
+        if let currentBest = bestMatch {
+          if area < currentBest.area {
+            bestMatch = (element, area)
+          }
+        } else {
+          bestMatch = (element, area)
+        }
+      }
+    }
+
+    for child in axChildren(element).prefix(60) {
+      walk(child, depth: depth + 1)
+    }
+  }
+
+  walk(root, depth: 0)
+  return bestMatch?.element
+}
+
+func performSemanticClick(at point: CGPoint, appRef: String) -> Bool {
+  guard let app = resolveApp(appRef),
+    let element = axClickableElement(at: point, for: app)
+  else {
+    return false
+  }
+
+  let actions = axActions(element)
+  let actionName: String?
+  if actions.contains(kAXPressAction as String) {
+    actionName = kAXPressAction as String
+  } else if actions.contains(kAXPickAction as String) {
+    actionName = kAXPickAction as String
+  } else {
+    actionName = nil
+  }
+
+  guard let actionName else {
+    return false
+  }
+
+  return AXUIElementPerformAction(element, actionName as CFString) == .success
+}
+
+func preferredKeyboardFocusElement(for app: NSRunningApplication) -> AXUIElement? {
+  if let focused = axFocusedElement(for: app), axBounds(focused) != nil {
+    return focused
+  }
+
+  let root = axRootElement(for: app)
+  var candidate: AXUIElement?
+
+  func score(_ element: AXUIElement) -> Int {
+    let role = axString(element, kAXRoleAttribute as String) ?? ""
+    let settable = axIsSettable(element, kAXValueAttribute as String)
+    var score = 0
+
+    if settable {
+      score += 5
+    }
+    if role == kAXTextFieldRole as String || role == kAXTextAreaRole as String {
+      score += 5
+    }
+    if role == kAXComboBoxRole as String || role == "AXSearchField" {
+      score += 4
+    }
+
+    return score
+  }
+
+  func walk(_ element: AXUIElement, depth: Int) {
+    if candidate != nil || depth > 8 {
+      return
+    }
+
+    if score(element) >= 5, axBounds(element) != nil {
+      candidate = element
+      return
+    }
+
+    for child in axChildren(element).prefix(40) {
+      walk(child, depth: depth + 1)
+      if candidate != nil {
+        return
+      }
+    }
+  }
+
+  walk(root, depth: 0)
+  return candidate
+}
+
+func focusPoint(for appRef: String) -> CGPoint? {
+  if let app = resolveApp(appRef) {
+    if let focusedElement = preferredKeyboardFocusElement(for: app), let bounds = axBounds(focusedElement) {
+      return CGPoint(x: bounds.x + (bounds.width / 2), y: bounds.y + (bounds.height / 2))
+    }
+  }
+
+  if let entry = resolvedWindowInfo(appRef: appRef) {
+    return CGPoint(x: entry.bounds.midX, y: entry.bounds.midY)
+  }
+
+  return nil
+}
+
+func revealInteractionPoint(_ point: CGPoint, clickToFocus: Bool) -> Bool {
+  OverlayCursorController.shared.animate(to: point, duration: 0.14)
+  if clickToFocus {
+    guard postClick(at: point) else {
+      return false
+    }
+  }
+  OverlayCursorController.shared.pulse()
+  usleep(70_000)
+  return true
+}
+
 func getAppStateResult(appRef: String) -> ResultPayload {
   let resolvedApp = resolveApp(appRef)
   let resolvedEntry = resolvedApp.map { windowInfo(for: $0.processIdentifier) } ?? resolveWindowEntry(appRef)
@@ -1046,6 +1277,25 @@ func captureWindowScreenshot(_ entry: WindowEntry) -> ArtifactsPayload? {
   }
 }
 
+func targetWindowElement(for app: NSRunningApplication) -> AXUIElement? {
+  let appElement = AXUIElementCreateApplication(app.processIdentifier)
+  if let focusedWindow = axElementValue(appElement, kAXFocusedWindowAttribute as String) {
+    return focusedWindow
+  }
+  if let mainWindow = axElementValue(appElement, kAXMainWindowAttribute as String) {
+    return mainWindow
+  }
+  return nil
+}
+
+@discardableResult
+func raiseTargetWindow(for app: NSRunningApplication) -> Bool {
+  guard let window = targetWindowElement(for: app) else {
+    return false
+  }
+  return AXUIElementPerformAction(window, kAXRaiseAction as CFString) == .success
+}
+
 func mouseButton(from rawValue: String?) -> CGMouseButton {
   switch rawValue {
   case "right":
@@ -1057,19 +1307,34 @@ func mouseButton(from rawValue: String?) -> CGMouseButton {
   }
 }
 
-func withActivatedApp<T>(appRef: String, activate: Bool = true, restorePreviousFocus: Bool = true, action: () -> T) -> T {
+func withActivatedApp<T>(
+  appRef: String,
+  activate: Bool = true,
+  restorePreviousFocus: Bool = true,
+  stackTargetBehindPrevious: Bool = false,
+  action: () -> T
+) -> T {
   let previousFrontmost = NSWorkspace.shared.frontmostApplication
   let targetApp = resolveApp(appRef)
+  let targetEntry = resolvedWindowInfo(appRef: appRef)
 
   if activate, let targetApp {
-    targetApp.activate()
-    usleep(120_000)
+    let previousIsTarget = previousFrontmost?.processIdentifier == targetApp.processIdentifier
+    if stackTargetBehindPrevious, !previousIsTarget {
+      _ = raiseTargetWindow(for: targetApp)
+      usleep(120_000)
+    } else {
+      targetApp.activate()
+      usleep(120_000)
+    }
   }
 
+  OverlayCursorController.shared.configure(for: targetEntry)
   let result = action()
 
   if restorePreviousFocus, let previousFrontmost, previousFrontmost.processIdentifier != targetApp?.processIdentifier {
     previousFrontmost.activate()
+    usleep(120_000)
   }
 
   return result
@@ -1127,20 +1392,50 @@ func clickResult(params: [String: JSONValue]) -> ResultPayload {
   }
 
   let button = mouseButton(from: buttonName)
-  let location = CGPoint(x: xValue, y: yValue)
+  guard let location = screenPoint(forScreenshotPoint: CGPoint(x: xValue, y: yValue), appRef: appRef) else {
+    return makeErrorResult(toolName: "click", code: "app_not_found", message: "appNotFound(\"\(appRef)\")")
+  }
 
-  let success = withActivatedApp(appRef: appRef) {
-    OverlayCursorController.shared.animate(to: location)
-    let clickSucceeded = postClick(at: location, button: button, clickCount: clickCount)
-    OverlayCursorController.shared.pulse()
-    OverlayCursorController.shared.scheduleIdleHide()
-    return clickSucceeded
+  let canUseSemanticClick = button == .left && clickCount == 1
+  var success = false
+
+  if canUseSemanticClick {
+    success = withActivatedApp(
+      appRef: appRef,
+      activate: true,
+      restorePreviousFocus: true,
+      stackTargetBehindPrevious: true
+    ) {
+      OverlayCursorController.shared.animate(to: location)
+      let pressed = performSemanticClick(at: location, appRef: appRef)
+      if pressed {
+        OverlayCursorController.shared.pulse()
+        OverlayCursorController.shared.scheduleIdleHide()
+      }
+      return pressed
+    }
+  }
+
+  if !success {
+    success = withActivatedApp(
+      appRef: appRef,
+      activate: true,
+      restorePreviousFocus: true,
+      stackTargetBehindPrevious: true
+    ) {
+      OverlayCursorController.shared.animate(to: location)
+      let clickSucceeded = postClick(at: location, button: button, clickCount: clickCount)
+      OverlayCursorController.shared.pulse()
+      OverlayCursorController.shared.scheduleIdleHide()
+      return clickSucceeded
+    }
   }
 
   guard success else {
     return makeErrorResult(toolName: "click", code: "internal_error", message: "Unable to create native click events.")
   }
 
+  usleep(250_000)
   return getAppStateResult(appRef: appRef)
 }
 
@@ -1158,13 +1453,18 @@ func dragResult(params: [String: JSONValue]) -> ResultPayload {
 
   let from = CGPoint(x: fromX, y: fromY)
   let to = CGPoint(x: toX, y: toY)
+  guard let fromScreen = screenPoint(forScreenshotPoint: from, appRef: appRef),
+    let toScreen = screenPoint(forScreenshotPoint: to, appRef: appRef)
+  else {
+    return makeErrorResult(toolName: "drag", code: "app_not_found", message: "appNotFound(\"\(appRef)\")")
+  }
   let steps = 12
 
-  let success = withActivatedApp(appRef: appRef) {
-    OverlayCursorController.shared.animate(to: from, duration: 0.14)
+  let success = withActivatedApp(appRef: appRef, restorePreviousFocus: true, stackTargetBehindPrevious: true) {
+    OverlayCursorController.shared.animate(to: fromScreen, duration: 0.14)
 
-    guard let moveEvent = CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: from, mouseButton: .left),
-      let downEvent = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: from, mouseButton: .left)
+    guard let moveEvent = CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: fromScreen, mouseButton: .left),
+      let downEvent = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: fromScreen, mouseButton: .left)
     else {
       return false
     }
@@ -1177,8 +1477,8 @@ func dragResult(params: [String: JSONValue]) -> ResultPayload {
     for index in 1...steps {
       let progress = Double(index) / Double(steps)
       let point = CGPoint(
-        x: from.x + ((to.x - from.x) * progress),
-        y: from.y + ((to.y - from.y) * progress)
+        x: fromScreen.x + ((toScreen.x - fromScreen.x) * progress),
+        y: fromScreen.y + ((toScreen.y - fromScreen.y) * progress)
       )
       OverlayCursorController.shared.move(to: point)
       guard let dragEvent = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDragged, mouseCursorPosition: point, mouseButton: .left) else {
@@ -1188,7 +1488,7 @@ func dragResult(params: [String: JSONValue]) -> ResultPayload {
       RunLoop.current.run(until: Date().addingTimeInterval(0.02))
     }
 
-    guard let upEvent = CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: to, mouseButton: .left) else {
+    guard let upEvent = CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: toScreen, mouseButton: .left) else {
       return false
     }
     upEvent.post(tap: .cghidEventTap)
@@ -1332,13 +1632,18 @@ func typeTextResult(params: [String: JSONValue]) -> ResultPayload {
     return makeErrorResult(toolName: "type_text", code: "internal_error", message: "Missing text parameter")
   }
 
-  let success = withActivatedApp(appRef: appRef) {
+  let success = withActivatedApp(appRef: appRef, restorePreviousFocus: true) {
+    if let point = focusPoint(for: appRef), !revealInteractionPoint(point, clickToFocus: true) {
+      return false
+    }
+
     for character in text {
       if !typeCharacter(character) {
         return false
       }
       usleep(30_000)
     }
+    OverlayCursorController.shared.scheduleIdleHide()
     return true
   }
 
@@ -1364,12 +1669,23 @@ func pressKeyResult(params: [String: JSONValue]) -> ResultPayload {
   }
 
   let flags = modifierFlags(from: parts.dropLast()[...])
-  let success = withActivatedApp(appRef: appRef) {
+  let success = withActivatedApp(appRef: appRef, stackTargetBehindPrevious: true) {
+    if let point = focusPoint(for: appRef) {
+      let shouldClickToFocus = flags.isEmpty && (rawKey.count == 1 || rawKey.lowercased() == "space")
+      if !revealInteractionPoint(point, clickToFocus: shouldClickToFocus) {
+        return false
+      }
+    }
+
     if let code = keyCode(for: rawKey) {
-      return postKeyCode(code, flags: flags)
+      let posted = postKeyCode(code, flags: flags)
+      OverlayCursorController.shared.scheduleIdleHide()
+      return posted
     }
     if rawKey.count == 1 {
-      return unicodeKeyPair(text: rawKey, flags: flags)
+      let posted = unicodeKeyPair(text: rawKey, flags: flags)
+      OverlayCursorController.shared.scheduleIdleHide()
+      return posted
     }
     return false
   }
@@ -1404,6 +1720,12 @@ func setValueResult(params: [String: JSONValue]) -> ResultPayload {
     return makeErrorResult(toolName: "set_value", code: "invalid_element", message: "\(elementIndex) is an invalid element ID")
   }
 
+  let targetPoint = axBounds(element).map { CGPoint(x: $0.x + ($0.width / 2), y: $0.y + ($0.height / 2)) }
+
+  if let targetPoint {
+    _ = revealInteractionPoint(targetPoint, clickToFocus: false)
+  }
+
   var success = AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, value as CFString) == .success
   if !success {
     success = withActivatedApp(appRef: appRef) {
@@ -1415,6 +1737,7 @@ func setValueResult(params: [String: JSONValue]) -> ResultPayload {
     return makeErrorResult(toolName: "set_value", code: "accessibility_error", message: "Accessibility error: Unable to set element value")
   }
 
+  OverlayCursorController.shared.scheduleIdleHide()
   usleep(120_000)
   return getAppStateResult(appRef: appRef)
 }
