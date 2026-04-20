@@ -22,8 +22,6 @@ For most source installs, the host app is whichever app launches the MCP server,
 - Codex
 - Cursor
 
-This project is intentionally `Option A`: unsigned alpha packaging for technical users. Permissions are attached to the host app/runtime context, not to a polished signed helper app.
-
 ## Install
 
 From the repo root:
