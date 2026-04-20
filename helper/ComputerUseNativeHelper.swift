@@ -2279,7 +2279,7 @@ func pressKeyResult(params: [String: JSONValue]) -> ResultPayload {
   }
 
   let flags = modifierFlags(from: parts.dropLast()[...])
-  let success = withActivatedApp(appRef: appRef, stackTargetBehindPrevious: true) {
+  let success = withActivatedApp(appRef: appRef, activate: true, restorePreviousFocus: true) {
     if let point = focusPoint(for: appRef) {
       let shouldClickToFocus = flags.isEmpty && (rawKey.count == 1 || rawKey.lowercased() == "space")
       if !revealInteractionPoint(point, clickToFocus: shouldClickToFocus) {
