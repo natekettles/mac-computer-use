@@ -1,6 +1,7 @@
 import AppKit
 import ApplicationServices
 import CoreGraphics
+import CoreServices
 import Foundation
 
 final class OverlayCursorView: NSView {
@@ -438,6 +439,53 @@ enum JSONValue: Codable {
 
 let decoder = JSONDecoder()
 let encoder = JSONEncoder()
+let timingInstrumentationEnabled = ProcessInfo.processInfo.environment["COMPUTER_USE_TIMING"] == "1"
+
+let windowEntriesCacheTTL: TimeInterval = 0.2
+let appMetadataCacheTTL: TimeInterval = 30
+let appActivationDelayMicros: useconds_t = 60_000
+let clickIntervalDelayMicros: useconds_t = 20_000
+let actionSettleDelayMicros: useconds_t = 60_000
+let revealSettleDelayMicros: useconds_t = 35_000
+let keyRepeatDelayMicros: useconds_t = 15_000
+let scrollFocusDelayMicros: useconds_t = 30_000
+
+var cachedWindowEntries: [WindowEntry] = []
+var cachedWindowEntriesAt: Date?
+var cachedAppMetadataIndex: [String: AppMetadata] = [:]
+var cachedAppMetadataAt: Date?
+
+func timingStart() -> DispatchTime {
+  DispatchTime.now()
+}
+
+func timingMillis(since start: DispatchTime) -> Double {
+  Double(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000
+}
+
+func logTiming(_ label: String, _ details: String? = nil, since start: DispatchTime) {
+  guard timingInstrumentationEnabled else {
+    return
+  }
+
+  let suffix = details.map { " \($0)" } ?? ""
+  FileHandle.standardError.write(Data(String(format: "[timing] %@%.0fms%@\n", label, timingMillis(since: start), suffix).utf8))
+}
+
+func waitForAsyncResult(
+  timeout: TimeInterval,
+  pollInterval: TimeInterval = 0.01,
+  isFinished: () -> Bool
+) -> Bool {
+  let deadline = Date().addingTimeInterval(timeout)
+  while !isFinished() {
+    if Date() >= deadline {
+      return false
+    }
+    RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(pollInterval))
+  }
+  return true
+}
 
 func writeResponse(_ response: Response) {
   guard let data = try? encoder.encode(response), let line = String(data: data, encoding: .utf8) else {
@@ -461,13 +509,22 @@ func makeErrorResult(toolName: String, code: String, message: String) -> ResultP
 }
 
 func windowEntries() -> [WindowEntry] {
+  let start = timingStart()
+  if let cachedAt = cachedWindowEntriesAt,
+    Date().timeIntervalSince(cachedAt) < windowEntriesCacheTTL
+  {
+    logTiming("windowEntries ", "cache=hit count=\(cachedWindowEntries.count)", since: start)
+    return cachedWindowEntries
+  }
+
   guard let infoList = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
     as? [[String: Any]]
   else {
+    logTiming("windowEntries ", "cache=miss count=0", since: start)
     return []
   }
 
-  return infoList.compactMap { info in
+  let entries: [WindowEntry] = infoList.compactMap { info -> WindowEntry? in
     guard let ownerPID = info[kCGWindowOwnerPID as String] as? pid_t, ownerPID > 0 else {
       return nil
     }
@@ -498,10 +555,22 @@ func windowEntries() -> [WindowEntry] {
     let windowID = info[kCGWindowNumber as String] as? UInt32 ?? 0
     return WindowEntry(pid: ownerPID, windowID: windowID, ownerName: ownerName, title: title, bounds: bounds)
   }
+
+  cachedWindowEntries = entries
+  cachedWindowEntriesAt = Date()
+  logTiming("windowEntries ", "cache=miss count=\(entries.count)", since: start)
+  return entries
 }
 
 func runningApp(for pid: pid_t) -> NSRunningApplication? {
   NSRunningApplication(processIdentifier: pid)
+}
+
+func metadataDateFormatter() -> DateFormatter {
+  let formatter = DateFormatter()
+  formatter.locale = Locale(identifier: "en_US_POSIX")
+  formatter.dateFormat = "yyyy-MM-dd HH:mm:ss Z"
+  return formatter
 }
 
 func shell(_ launchPath: String, _ arguments: [String]) -> String? {
@@ -529,6 +598,20 @@ func shell(_ launchPath: String, _ arguments: [String]) -> String? {
 
 func appDisplayName(_ app: NSRunningApplication) -> String {
   app.localizedName ?? app.bundleIdentifier ?? "Unknown App"
+}
+
+func normalizeMetadataString(_ raw: Any?) -> String? {
+  if let value = raw as? String {
+    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard trimmed != "(null)", trimmed != "null", !trimmed.isEmpty else {
+      return nil
+    }
+    if trimmed.hasPrefix("\""), trimmed.hasSuffix("\""), trimmed.count >= 2 {
+      return String(trimmed.dropFirst().dropLast())
+    }
+    return trimmed
+  }
+  return nil
 }
 
 func installedApplicationPaths() -> [String] {
@@ -589,26 +672,13 @@ func mdlsMetadata(for appPath: String) -> AppMetadata? {
     return nil
   }
 
-  func normalizedString(_ raw: String) -> String? {
-    let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard trimmed != "(null)", trimmed != "null", !trimmed.isEmpty else {
-      return nil
-    }
-    if trimmed.hasPrefix("\""), trimmed.hasSuffix("\""), trimmed.count >= 2 {
-      return String(trimmed.dropFirst().dropLast())
-    }
-    return trimmed
-  }
+  let formatter = metadataDateFormatter()
 
-  let formatter = DateFormatter()
-  formatter.locale = Locale(identifier: "en_US_POSIX")
-  formatter.dateFormat = "yyyy-MM-dd HH:mm:ss Z"
-
-  let bundleId = normalizedString(lines[0])
-  let displayName = normalizedString(lines[1]) ?? URL(fileURLWithPath: appPath).deletingPathExtension().lastPathComponent
-  let lastUsedRaw = normalizedString(lines[2])
+  let bundleId = normalizeMetadataString(lines[0])
+  let displayName = normalizeMetadataString(lines[1]) ?? URL(fileURLWithPath: appPath).deletingPathExtension().lastPathComponent
+  let lastUsedRaw = normalizeMetadataString(lines[2])
   let lastUsed = lastUsedRaw.flatMap { formatter.date(from: $0) }
-  let useCount = normalizedString(lines[3]).flatMap(Int.init)
+  let useCount = normalizeMetadataString(lines[3]).flatMap(Int.init)
 
   return AppMetadata(
     path: appPath,
@@ -620,11 +690,57 @@ func mdlsMetadata(for appPath: String) -> AppMetadata? {
   )
 }
 
-func appMetadataIndex() -> [String: AppMetadata] {
-  var byBundleId: [String: AppMetadata] = [:]
+func mdQueryMetadata(for item: MDItem, formatter: DateFormatter) -> AppMetadata? {
+  let path = normalizeMetadataString(MDItemCopyAttribute(item, kMDItemPath as CFString))
+  let bundleId = normalizeMetadataString(MDItemCopyAttribute(item, kMDItemCFBundleIdentifier as CFString))
+  let displayName = normalizeMetadataString(MDItemCopyAttribute(item, kMDItemDisplayName as CFString))
+    ?? path.map { URL(fileURLWithPath: $0).deletingPathExtension().lastPathComponent }
+  let lastUsedDate = MDItemCopyAttribute(item, kMDItemLastUsedDate as CFString) as? Date
+  let lastUsedRaw = lastUsedDate.map { formatter.string(from: $0) }
+  let useCount = (MDItemCopyAttribute(item, "kMDItemUseCount" as CFString) as? NSNumber)?.intValue
 
-  for path in installedApplicationPaths() {
-    guard let metadata = mdlsMetadata(for: path), let bundleId = metadata.bundleId else {
+  guard let path, let displayName else {
+    return nil
+  }
+
+  return AppMetadata(
+    path: path,
+    bundleId: bundleId,
+    displayName: displayName,
+    lastUsed: lastUsedDate,
+    lastUsedRaw: lastUsedRaw,
+    useCount: useCount
+  )
+}
+
+func mdQueryAppMetadataIndex() -> [String: AppMetadata] {
+  let formatter = metadataDateFormatter()
+  let queryString = "kMDItemContentType == 'com.apple.application-bundle'"
+  let sortingAttrs = [kMDItemLastUsedDate as CFString] as CFArray
+  guard let query = MDQueryCreate(kCFAllocatorDefault, queryString as CFString, nil, sortingAttrs) else {
+    return [:]
+  }
+
+  MDQuerySetSearchScope(query, [kMDQueryScopeComputerIndexed] as CFArray, 0)
+  MDQuerySetMaxCount(query, 400)
+  guard MDQueryExecute(query, CFOptionFlags(kMDQuerySynchronous.rawValue)) else {
+    return [:]
+  }
+
+  var byBundleId: [String: AppMetadata] = [:]
+  let resultCount = MDQueryGetResultCount(query)
+  if resultCount <= 0 {
+    return byBundleId
+  }
+
+  for index in 0..<resultCount {
+    guard let rawItem = MDQueryGetResultAtIndex(query, index) else {
+      continue
+    }
+    let item = unsafeBitCast(rawItem, to: MDItem.self)
+    guard let metadata = mdQueryMetadata(for: item, formatter: formatter),
+      let bundleId = metadata.bundleId
+    else {
       continue
     }
 
@@ -639,6 +755,43 @@ func appMetadataIndex() -> [String: AppMetadata] {
     }
   }
 
+  return byBundleId
+}
+
+func appMetadataIndex() -> [String: AppMetadata] {
+  let start = timingStart()
+  if let cachedAt = cachedAppMetadataAt,
+    Date().timeIntervalSince(cachedAt) < appMetadataCacheTTL
+  {
+    logTiming("appMetadataIndex ", "cache=hit count=\(cachedAppMetadataIndex.count)", since: start)
+    return cachedAppMetadataIndex
+  }
+
+  var byBundleId = mdQueryAppMetadataIndex()
+  var source = "mdquery"
+
+  if byBundleId.isEmpty {
+    source = "mdls"
+    for path in installedApplicationPaths() {
+      guard let metadata = mdlsMetadata(for: path), let bundleId = metadata.bundleId else {
+        continue
+      }
+
+      if let existing = byBundleId[bundleId] {
+        let existingScore = (existing.lastUsed?.timeIntervalSince1970 ?? 0) + Double(existing.useCount ?? 0)
+        let metadataScore = (metadata.lastUsed?.timeIntervalSince1970 ?? 0) + Double(metadata.useCount ?? 0)
+        if metadataScore > existingScore {
+          byBundleId[bundleId] = metadata
+        }
+      } else {
+        byBundleId[bundleId] = metadata
+      }
+    }
+  }
+
+  cachedAppMetadataIndex = byBundleId
+  cachedAppMetadataAt = Date()
+  logTiming("appMetadataIndex ", "cache=miss source=\(source) count=\(byBundleId.count)", since: start)
   return byBundleId
 }
 
@@ -725,6 +878,7 @@ func isLikelyUserFacingApp(_ app: NSRunningApplication, visiblePIDs: Set<pid_t>,
 }
 
 func listAppsResult() -> ResultPayload {
+  let start = timingStart()
   let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
   let visiblePIDs = Set(windowEntries().map(\.pid))
   let metadataByBundleId = appMetadataIndex()
@@ -880,7 +1034,7 @@ func listAppsResult() -> ResultPayload {
     return "\(name) — \(bundleText) [\(flags.joined(separator: ", "))]"
   }.joined(separator: "\n")
 
-  return ResultPayload(
+  let result = ResultPayload(
     ok: true,
     toolName: "list_apps",
     app: nil,
@@ -891,6 +1045,8 @@ func listAppsResult() -> ResultPayload {
     meta: MetaPayload(observedShape: "text", rawText: rawText),
     error: nil
   )
+  logTiming("list_apps ", "apps=\(apps.count)", since: start)
+  return result
 }
 
 func resolveApp(_ ref: String) -> NSRunningApplication? {
@@ -1338,6 +1494,7 @@ func walkPresentedAXTree(
 }
 
 func buildAXSnapshot(for app: NSRunningApplication) -> AXSnapshotData {
+  let start = timingStart()
   let root = axRootElement(for: app)
   var elements: [ElementPayload] = []
   var lines: [String] = []
@@ -1375,14 +1532,18 @@ func buildAXSnapshot(for app: NSRunningApplication) -> AXSnapshotData {
   }
 
   if lines.isEmpty {
-    return AXSnapshotData(
+    let snapshot = AXSnapshotData(
       treeText: "",
       elements: elements,
       warnings: warnings + ["Accessibility tree extraction returned no visible elements."]
     )
+    logTiming("buildAXSnapshot ", "elements=\(elements.count)", since: start)
+    return snapshot
   }
 
-  return AXSnapshotData(treeText: lines.joined(separator: "\n"), elements: elements, warnings: warnings)
+  let snapshot = AXSnapshotData(treeText: lines.joined(separator: "\n"), elements: elements, warnings: warnings)
+  logTiming("buildAXSnapshot ", "elements=\(elements.count)", since: start)
+  return snapshot
 }
 
 func axElementByIndex(for app: NSRunningApplication, index targetIndex: String) -> AXUIElement? {
@@ -1605,15 +1766,23 @@ func revealInteractionPoint(_ point: CGPoint, clickToFocus: Bool) -> Bool {
     }
   }
   OverlayCursorController.shared.pulse()
-  usleep(70_000)
+  usleep(revealSettleDelayMicros)
   return true
 }
 
 func getAppStateResult(appRef: String) -> ResultPayload {
   let resolvedApp = resolveApp(appRef)
-  let resolvedEntry = resolvedApp.map { windowInfo(for: $0.processIdentifier) } ?? resolveWindowEntry(appRef)
+  let resolvedEntry = resolvedApp.flatMap { windowInfo(for: $0.processIdentifier) } ?? resolveWindowEntry(appRef)
+  return getAppStateResult(appRef: appRef, resolvedApp: resolvedApp, resolvedEntry: resolvedEntry)
+}
 
-  guard let entry = resolvedEntry ?? resolvedApp.flatMap({ windowInfo(for: $0.processIdentifier) }) else {
+func getAppStateResult(
+  appRef: String,
+  resolvedApp: NSRunningApplication?,
+  resolvedEntry: WindowEntry?
+) -> ResultPayload {
+  let start = timingStart()
+  guard let entry = resolvedEntry else {
     return makeErrorResult(toolName: "get_app_state", code: "app_not_found", message: "appNotFound(\"\(appRef)\")")
   }
 
@@ -1621,15 +1790,19 @@ func getAppStateResult(appRef: String) -> ResultPayload {
   let title = entry.title
   let bundleId = app?.bundleIdentifier ?? appRef
   let appName = app?.localizedName ?? entry.ownerName
+  let screenshotStart = timingStart()
   let screenshot = captureWindowScreenshot(entry)
+  logTiming("get_app_state.screenshot ", "ok=\(screenshot != nil)", since: screenshotStart)
+  let snapshotStart = timingStart()
   let axSnapshot = app.map(buildAXSnapshot)
+  logTiming("get_app_state.ax ", "ok=\(axSnapshot != nil)", since: snapshotStart)
   let bodyText = axSnapshot?.treeText ?? ""
   let treeText = bodyText.isEmpty
     ? "App=\(bundleId) (pid \(entry.pid))\nWindow: \"\(title ?? "<unknown>")\", App: \(appName)."
     : "App=\(bundleId) (pid \(entry.pid))\nWindow: \"\(title ?? "<unknown>")\", App: \(appName).\n\(bodyText)"
   let rawText = "Computer Use state (CUA App Version: 750)\n<app_state>\n\(treeText)\n\n</app_state>"
 
-  return ResultPayload(
+  let result = ResultPayload(
     ok: true,
     toolName: "get_app_state",
     app: AppPayload(name: appName, bundleId: app?.bundleIdentifier, pid: Int(entry.pid)),
@@ -1644,27 +1817,56 @@ func getAppStateResult(appRef: String) -> ResultPayload {
     meta: MetaPayload(observedShape: "state+image", rawText: rawText),
     error: nil
   )
+  logTiming("get_app_state ", "elements=\(axSnapshot?.elements.count ?? 0)", since: start)
+  return result
+}
+
+func pngData(from image: CGImage) -> Data? {
+  let bitmapRep = NSBitmapImageRep(cgImage: image)
+  return bitmapRep.representation(using: .png, properties: [:])
 }
 
 func captureWindowScreenshot(_ entry: WindowEntry) -> ArtifactsPayload? {
-  let fileURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("computer-use-\(UUID().uuidString).png")
+  let start = timingStart()
+  let executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+  let helperURL = executableURL.deletingLastPathComponent().appendingPathComponent("WindowCaptureHelper")
   let process = Process()
-  process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
-  process.arguments = ["-x", "-R\(Int(entry.bounds.origin.x)),\(Int(entry.bounds.origin.y)),\(Int(entry.bounds.width)),\(Int(entry.bounds.height))", fileURL.path]
+  process.executableURL = helperURL
+  process.arguments = [
+    "--pid", String(entry.pid),
+    "--window-id", String(entry.windowID),
+    "--title", entry.title ?? "",
+  ]
+
+  let stdout = Pipe()
+  let stderr = Pipe()
+  process.standardOutput = stdout
+  process.standardError = stderr
 
   do {
     try process.run()
     process.waitUntilExit()
     guard process.terminationStatus == 0 else {
-      try? FileManager.default.removeItem(at: fileURL)
+      let errorOutput = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+        .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+      logTiming("captureWindowScreenshot ", "ok=false error=\(errorOutput)", since: start)
       return nil
     }
 
-    let data = try Data(contentsOf: fileURL)
-    try? FileManager.default.removeItem(at: fileURL)
-    return ArtifactsPayload(screenshotMimeType: "image/png", screenshotBase64: data.base64EncodedString())
+    let base64Data = stdout.fileHandleForReading.readDataToEndOfFile()
+    guard let base64 = String(data: base64Data, encoding: .utf8)?
+      .trimmingCharacters(in: .whitespacesAndNewlines),
+      !base64.isEmpty
+    else {
+      logTiming("captureWindowScreenshot ", "ok=false error=empty-output", since: start)
+      return nil
+    }
+
+    let artifacts = ArtifactsPayload(screenshotMimeType: "image/png", screenshotBase64: base64)
+    logTiming("captureWindowScreenshot ", "ok=true source=sck-sidecar bytes=\(base64.count)", since: start)
+    return artifacts
   } catch {
-    try? FileManager.default.removeItem(at: fileURL)
+    logTiming("captureWindowScreenshot ", "ok=false", since: start)
     return nil
   }
 }
@@ -1714,10 +1916,10 @@ func withActivatedApp<T>(
     let previousIsTarget = previousFrontmost?.processIdentifier == targetApp.processIdentifier
     if stackTargetBehindPrevious, !previousIsTarget {
       _ = raiseTargetWindow(for: targetApp)
-      usleep(120_000)
+      usleep(appActivationDelayMicros)
     } else {
       targetApp.activate()
-      usleep(120_000)
+      usleep(appActivationDelayMicros)
     }
   }
 
@@ -1726,7 +1928,7 @@ func withActivatedApp<T>(
 
   if restorePreviousFocus, let previousFrontmost, previousFrontmost.processIdentifier != targetApp?.processIdentifier {
     previousFrontmost.activate()
-    usleep(120_000)
+    usleep(appActivationDelayMicros)
   }
 
   return result
@@ -1756,7 +1958,7 @@ func postClick(at location: CGPoint, button: CGMouseButton = .left, clickCount: 
     upEvent.setIntegerValueField(.mouseEventClickState, value: Int64(clickCount))
     downEvent.post(tap: .cghidEventTap)
     upEvent.post(tap: .cghidEventTap)
-    usleep(40_000)
+    usleep(clickIntervalDelayMicros)
   }
   return true
 }
@@ -1843,7 +2045,7 @@ func clickResult(params: [String: JSONValue]) -> ResultPayload {
     return makeErrorResult(toolName: "click", code: "internal_error", message: "Unable to create native click events.")
   }
 
-  usleep(250_000)
+  usleep(actionSettleDelayMicros)
   return getAppStateResult(appRef: appRef)
 }
 
@@ -1878,9 +2080,9 @@ func dragResult(params: [String: JSONValue]) -> ResultPayload {
     }
 
     moveEvent.post(tap: .cghidEventTap)
-    usleep(40_000)
+    usleep(clickIntervalDelayMicros)
     downEvent.post(tap: .cghidEventTap)
-    usleep(40_000)
+    usleep(clickIntervalDelayMicros)
 
     for index in 1...steps {
       let progress = Double(index) / Double(steps)
@@ -1909,7 +2111,7 @@ func dragResult(params: [String: JSONValue]) -> ResultPayload {
     return makeErrorResult(toolName: "drag", code: "internal_error", message: "Unable to post native drag events.")
   }
 
-  usleep(120_000)
+  usleep(actionSettleDelayMicros)
   return getAppStateResult(appRef: appRef)
 }
 
@@ -2049,7 +2251,7 @@ func typeTextResult(params: [String: JSONValue]) -> ResultPayload {
       if !typeCharacter(character) {
         return false
       }
-      usleep(30_000)
+      usleep(keyRepeatDelayMicros)
     }
     OverlayCursorController.shared.scheduleIdleHide()
     return true
@@ -2059,7 +2261,7 @@ func typeTextResult(params: [String: JSONValue]) -> ResultPayload {
     return makeErrorResult(toolName: "type_text", code: "internal_error", message: "Unable to post native text events.")
   }
 
-  usleep(120_000)
+  usleep(actionSettleDelayMicros)
   return getAppStateResult(appRef: appRef)
 }
 
@@ -2106,7 +2308,7 @@ func pressKeyResult(params: [String: JSONValue]) -> ResultPayload {
     )
   }
 
-  usleep(120_000)
+  usleep(actionSettleDelayMicros)
   return getAppStateResult(appRef: appRef)
 }
 
@@ -2146,7 +2348,7 @@ func setValueResult(params: [String: JSONValue]) -> ResultPayload {
   }
 
   OverlayCursorController.shared.scheduleIdleHide()
-  usleep(120_000)
+  usleep(actionSettleDelayMicros)
   return getAppStateResult(appRef: appRef)
 }
 
@@ -2235,7 +2437,7 @@ func performSecondaryActionResult(params: [String: JSONValue]) -> ResultPayload 
     )
   }
 
-  usleep(120_000)
+  usleep(actionSettleDelayMicros)
   return getAppStateResult(appRef: appRef)
 }
 
@@ -2262,7 +2464,7 @@ func scrollResult(params: [String: JSONValue]) -> ResultPayload {
   }
 
   guard let scrollPoint = scrollInteractionPoint(for: target.element) else {
-    usleep(120_000)
+    usleep(actionSettleDelayMicros)
     return getAppStateResult(appRef: appRef)
   }
 
@@ -2274,7 +2476,7 @@ func scrollResult(params: [String: JSONValue]) -> ResultPayload {
       return false
     }
     mouseMove.post(tap: .cghidEventTap)
-    usleep(60_000)
+    usleep(scrollFocusDelayMicros)
 
     guard let event = CGEvent(
       scrollWheelEvent2Source: nil,
@@ -2323,7 +2525,7 @@ func scrollResult(params: [String: JSONValue]) -> ResultPayload {
     )
   }
 
-  usleep(120_000)
+  usleep(actionSettleDelayMicros)
   return getAppStateResult(appRef: appRef)
 }
 

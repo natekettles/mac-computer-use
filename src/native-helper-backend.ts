@@ -2,7 +2,6 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
 
@@ -33,6 +32,7 @@ export class NativeHelperBackend implements ComputerUseBackend {
     }
   >();
   private nextId = 0;
+  private helperReady: Promise<string> | null = null;
 
   async listApps(_params: ListAppsParams): Promise<ComputerUseToolResult> {
     return this.send("list_apps", {});
@@ -71,6 +71,7 @@ export class NativeHelperBackend implements ComputerUseBackend {
   }
 
   private async send(method: HelperMethod, params: Record<string, unknown>): Promise<ComputerUseToolResult> {
+    await this.ensureHelperBinary();
     const child = this.ensureChild();
     const id = `req_${++this.nextId}`;
     const request: HelperRequest = { id, method, params };
@@ -80,40 +81,7 @@ export class NativeHelperBackend implements ComputerUseBackend {
       child.stdin.write(`${JSON.stringify(request)}\n`);
     });
 
-    return this.withScreenshot(result);
-  }
-
-  private async withScreenshot(result: ComputerUseToolResult): Promise<ComputerUseToolResult> {
-    if (!result.ok || result.meta.observedShape !== "state+image" || result.artifacts?.screenshotBase64) {
-      return result;
-    }
-
-    const bounds = result.snapshot?.elements?.[0]?.bounds;
-    if (!bounds) {
-      return result;
-    }
-
-    const tempPath = path.join(os.tmpdir(), `computer-use-${Date.now()}-${Math.random().toString(16).slice(2)}.png`);
-    try {
-      await execFileAsync("/usr/sbin/screencapture", [
-        "-x",
-        `-R${Math.round(bounds.x)},${Math.round(bounds.y)},${Math.round(bounds.width)},${Math.round(bounds.height)}`,
-        tempPath,
-      ]);
-      const screenshotBase64 = await fs.readFile(tempPath, "base64");
-      return {
-        ...result,
-        artifacts: {
-          screenshotMimeType: "image/png",
-          screenshotBase64,
-        },
-        warnings: result.warnings.filter((warning) => warning !== "Native helper screenshot capture is not implemented yet."),
-      };
-    } catch {
-      return result;
-    } finally {
-      await fs.rm(tempPath, { force: true }).catch(() => {});
-    }
+    return result;
   }
 
   private ensureChild(): ChildProcessWithoutNullStreams {
@@ -121,18 +89,12 @@ export class NativeHelperBackend implements ComputerUseBackend {
       return this.child;
     }
 
-    const helperPath = path.join(process.cwd(), "helper", "ComputerUseNativeHelper.swift");
     const cachePath = path.join(process.cwd(), ".swift-cache");
-    const homePath = path.join(process.cwd(), ".swift-home");
-    const child = spawn("swift", [helperPath], {
+    const helperBinary = path.join(cachePath, "ComputerUseNativeHelper");
+    const child = spawn(helperBinary, [], {
       cwd: process.cwd(),
       stdio: ["pipe", "pipe", "pipe"],
-      env: {
-        ...process.env,
-        HOME: homePath,
-        CLANG_MODULE_CACHE_PATH: cachePath,
-        SWIFT_MODULECACHE_PATH: cachePath,
-      },
+      env: process.env,
     });
 
     const stdout = readline.createInterface({ input: child.stdout });
@@ -165,7 +127,11 @@ export class NativeHelperBackend implements ComputerUseBackend {
 
     let stderr = "";
     child.stderr.on("data", (chunk: Buffer | string) => {
-      stderr += chunk.toString();
+      const text = chunk.toString();
+      stderr += text;
+      if (process.env.COMPUTER_USE_TIMING === "1") {
+        process.stderr.write(text);
+      }
     });
 
     child.on("error", (error) => {
@@ -181,6 +147,53 @@ export class NativeHelperBackend implements ComputerUseBackend {
 
     this.child = child;
     return child;
+  }
+
+  private async ensureHelperBinary(): Promise<string> {
+    if (this.helperReady) {
+      return this.helperReady;
+    }
+
+    this.helperReady = (async () => {
+      const cachePath = path.join(process.cwd(), ".swift-cache");
+      await fs.mkdir(cachePath, { recursive: true });
+      const helperTargets = [
+        {
+          source: path.join(process.cwd(), "helper", "ComputerUseNativeHelper.swift"),
+          binary: path.join(cachePath, "ComputerUseNativeHelper"),
+        },
+        {
+          source: path.join(process.cwd(), "helper", "WindowCaptureHelper.swift"),
+          binary: path.join(cachePath, "WindowCaptureHelper"),
+        },
+      ];
+
+      for (const target of helperTargets) {
+        const [sourceStat, binaryStat] = await Promise.all([
+          fs.stat(target.source),
+          fs.stat(target.binary).catch(() => null),
+        ]);
+
+        const binaryIsFresh = binaryStat && binaryStat.mtimeMs >= sourceStat.mtimeMs;
+        if (!binaryIsFresh) {
+          await execFileAsync("swiftc", [target.source, "-o", target.binary], {
+            cwd: process.cwd(),
+            env: {
+              ...process.env,
+              CLANG_MODULE_CACHE_PATH: cachePath,
+              SWIFT_MODULECACHE_PATH: cachePath,
+            },
+          });
+        }
+      }
+
+      return path.join(cachePath, "ComputerUseNativeHelper");
+    })().catch((error) => {
+      this.helperReady = null;
+      throw error;
+    });
+
+    return this.helperReady;
   }
 
   private rejectAll(error: Error): void {
