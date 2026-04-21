@@ -5,8 +5,8 @@ import CoreServices
 import Foundation
 
 final class OverlayCursorView: NSView {
-  private let drawingInset = CGPoint(x: 6, y: 6)
-  private let scaleAnchor = CGPoint(x: 12, y: 27)
+  private let drawingInset = CGPoint(x: 30, y: 30)
+  private let scaleAnchor = CGPoint(x: 30.35, y: 48.31)
 
   var pulseAlpha: CGFloat = 0 {
     didSet {
@@ -15,6 +15,12 @@ final class OverlayCursorView: NSView {
   }
 
   var cursorScale: CGFloat = 1 {
+    didSet {
+      needsDisplay = true
+    }
+  }
+
+  var cursorAngle: CGFloat = 0 {
     didSet {
       needsDisplay = true
     }
@@ -34,6 +40,7 @@ final class OverlayCursorView: NSView {
     NSGraphicsContext.saveGraphicsState()
     let transform = NSAffineTransform()
     transform.translateX(by: scaleAnchor.x, yBy: scaleAnchor.y)
+    transform.rotate(byRadians: cursorAngle)
     transform.scale(by: cursorScale)
     transform.translateX(by: -scaleAnchor.x, yBy: -scaleAnchor.y)
     transform.concat()
@@ -55,9 +62,9 @@ final class OverlayCursorView: NSView {
     let glow = NSShadow()
     glow.shadowBlurRadius = pressed ? 9 : 10
     glow.shadowOffset = NSSize(width: 0, height: 0)
-    glow.shadowColor = NSColor(calibratedWhite: 1.0, alpha: pressed ? 0.44 : 0.34)
+    glow.shadowColor = NSColor(calibratedWhite: 0.0, alpha: pressed ? 0.38 : 0.28)
     glow.set()
-    NSColor(calibratedWhite: 1.0, alpha: 0.24).setStroke()
+    NSColor(calibratedWhite: 1.0, alpha: 0.7).setStroke()
     shadowPath.lineWidth = 4.2
     shadowPath.lineJoinStyle = .round
     shadowPath.lineCapStyle = .round
@@ -66,8 +73,8 @@ final class OverlayCursorView: NSView {
 
     let arrow = roundedPointerPath(inset: 0)
 
-    let fillAlpha: CGFloat = pressed ? 0.34 : 0.28
-    NSColor(calibratedWhite: 0.72, alpha: fillAlpha).setFill()
+    let fillAlpha: CGFloat = pressed ? 0.68 : 0.54
+    NSColor(calibratedWhite: 0.10, alpha: fillAlpha).setFill()
     arrow.fill()
 
     NSColor(calibratedWhite: 1.0, alpha: pressed ? 0.94 : 0.86).setStroke()
@@ -121,9 +128,10 @@ final class OverlayCursorView: NSView {
 final class OverlayCursorController {
   static let shared = OverlayCursorController()
 
-  private let size = CGSize(width: 40, height: 38)
-  private let hotspot = CGPoint(x: 12, y: 27)
-  private let idleHideDelay: TimeInterval = 1.5
+  private let size = CGSize(width: 96, height: 96)
+  private let hotspot = CGPoint(x: 30.35, y: 48.31)
+  private let idleHideDelay: TimeInterval = 8
+  private let defaultCursorDirection: CGFloat = (3 * .pi) / 4
   private let overlayQueue = DispatchQueue(label: "computer-use.overlay")
   private var window: NSWindow?
   private var view: OverlayCursorView? {
@@ -144,7 +152,23 @@ final class OverlayCursorController {
     window?.level = targetWindowLevel
   }
 
+  func showActivity(at point: CGPoint, wiggle: Bool = true) {
+    animate(to: point, duration: 0.22, settle: false)
+    if wiggle {
+      thinkingWiggle()
+    }
+    extendVisibility()
+  }
+
+  func extendVisibility(after delay: TimeInterval? = nil) {
+    scheduleIdleHide(after: delay ?? idleHideDelay)
+  }
+
   func animate(to point: CGPoint, duration: TimeInterval = 0.16) {
+    animate(to: point, duration: duration, settle: true)
+  }
+
+  private func animate(to point: CGPoint, duration: TimeInterval, settle: Bool) {
     cancelHide()
     let start = animationStartPoint(for: point)
     show(at: start)
@@ -152,8 +176,8 @@ final class OverlayCursorController {
     let dx = point.x - start.x
     let dy = point.y - start.y
     let distance = sqrt((dx * dx) + (dy * dy))
-    let adjustedDuration = max(duration, min(0.42, 0.14 + (distance / 900.0)))
-    let steps = max(Int(adjustedDuration / 0.02), 1)
+    let adjustedDuration = max(duration, min(0.7, 0.22 + (distance / 700.0)))
+    let steps = max(Int(adjustedDuration / 0.024), 1)
     for step in 1...steps {
       let progress = CGFloat(step) / CGFloat(steps)
       let eased = progress < 0.5
@@ -168,12 +192,18 @@ final class OverlayCursorController {
     }
 
     currentPoint = point
+    if settle {
+      settleRotation()
+    }
   }
 
   func move(to point: CGPoint) {
     cancelHide()
     let window = ensureWindow()
     window.level = targetWindowLevel
+    if let currentPoint {
+      view?.cursorAngle = movementRotation(from: currentPoint, to: point)
+    }
     let appKitPoint = appKitPoint(fromDisplayPoint: point)
     window.setFrameOrigin(NSPoint(x: appKitPoint.x - hotspot.x, y: appKitPoint.y - hotspot.y))
     if let targetWindowID {
@@ -223,12 +253,40 @@ final class OverlayCursorController {
         : 1 - pow(-2 * progress + 2, 3) / 2
       view?.pulseAlpha = 1 - progress
       view?.cursorScale = 0.9 + (0.1 * eased)
-      RunLoop.current.run(until: Date().addingTimeInterval(0.018))
+      RunLoop.current.run(until: Date().addingTimeInterval(0.026))
     }
 
     view?.pressed = false
     view?.pulseAlpha = 0
     view?.cursorScale = 1
+  }
+
+  func thinkingWiggle(cycles: Int = 2) {
+    _ = ensureWindow()
+    let baseAngle = view?.cursorAngle ?? 0
+    let frames = max(cycles * 8, 1)
+    for frame in 0...frames {
+      let progress = CGFloat(frame) / CGFloat(frames)
+      let wave = sin(progress * CGFloat(cycles) * 2 * .pi)
+      view?.cursorAngle = baseAngle + (wave * 0.14)
+      RunLoop.current.run(until: Date().addingTimeInterval(0.034))
+    }
+    view?.cursorAngle = baseAngle
+  }
+
+  func settleRotation() {
+    guard let view else {
+      return
+    }
+    let startAngle = view.cursorAngle
+    let steps = 8
+    for step in 1...steps {
+      let progress = CGFloat(step) / CGFloat(steps)
+      let eased = 1 - pow(1 - progress, 2)
+      view.cursorAngle = startAngle * (1 - eased)
+      RunLoop.current.run(until: Date().addingTimeInterval(0.022))
+    }
+    view.cursorAngle = 0
   }
 
   private func show(at point: CGPoint) {
@@ -249,6 +307,18 @@ final class OverlayCursorController {
     }
 
     return CGPoint(x: target.x - 26, y: target.y + 22)
+  }
+
+  private func movementRotation(from start: CGPoint, to end: CGPoint) -> CGFloat {
+    let dx = end.x - start.x
+    let dy = end.y - start.y
+    guard hypot(dx, dy) >= 1 else {
+      return view?.cursorAngle ?? 0
+    }
+
+    let appKitDy = -dy
+    let desiredDirection = atan2(appKitDy, dx)
+    return desiredDirection - defaultCursorDirection
   }
 
   private func cancelHide() {
@@ -859,6 +929,10 @@ func isLikelyUserFacingApp(_ app: NSRunningApplication, visiblePIDs: Set<pid_t>,
 }
 
 func listAppsResult() -> ResultPayload {
+  if let target = frontmostActivityTarget() {
+    revealObservationPoint(entry: target.entry, point: target.point)
+  }
+
   let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
   let visiblePIDs = Set(windowEntries().map(\.pid))
   let metadataByBundleId = appMetadataIndex()
@@ -1025,6 +1099,7 @@ func listAppsResult() -> ResultPayload {
     meta: MetaPayload(observedShape: "text", rawText: rawText),
     error: nil
   )
+  OverlayCursorController.shared.extendVisibility()
   return result
 }
 
@@ -1066,6 +1141,45 @@ func windowInfo(for pid: pid_t) -> WindowEntry? {
 
 func resolvedWindowInfo(appRef: String) -> WindowEntry? {
   (resolveApp(appRef).flatMap { windowInfo(for: $0.processIdentifier) }) ?? resolveWindowEntry(appRef)
+}
+
+func windowCenter(_ entry: WindowEntry) -> CGPoint {
+  CGPoint(x: entry.bounds.midX, y: entry.bounds.midY)
+}
+
+func frontmostActivityTarget() -> (entry: WindowEntry?, point: CGPoint)? {
+  if let frontmost = NSWorkspace.shared.frontmostApplication,
+    let entry = windowInfo(for: frontmost.processIdentifier)
+  {
+    return (entry, windowCenter(entry))
+  }
+
+  let mouse = displayPoint(fromAppKitPoint: NSEvent.mouseLocation)
+  return (nil, mouse)
+}
+
+func revealObservationPoint(entry: WindowEntry?, point: CGPoint, wiggle: Bool = true) {
+  OverlayCursorController.shared.configure(for: entry)
+  OverlayCursorController.shared.showActivity(at: point, wiggle: wiggle)
+}
+
+func revealObservationPoint(appRef: String, entry: WindowEntry? = nil, wiggle: Bool = true) {
+  if let app = resolveApp(appRef),
+    let focused = preferredKeyboardFocusElement(for: app),
+    let bounds = axBounds(focused)
+  {
+    revealObservationPoint(
+      entry: entry ?? windowInfo(for: app.processIdentifier),
+      point: keyboardFocusPoint(for: focused, bounds: bounds),
+      wiggle: wiggle
+    )
+    return
+  }
+
+  let targetEntry = entry ?? resolvedWindowInfo(appRef: appRef)
+  if let targetEntry {
+    revealObservationPoint(entry: targetEntry, point: windowCenter(targetEntry), wiggle: wiggle)
+  }
 }
 
 func isLikelyStageManagerThumbnail(_ entry: WindowEntry) -> Bool {
@@ -1827,10 +1941,23 @@ func preferredKeyboardFocusElement(for app: NSRunningApplication) -> AXUIElement
   return candidate
 }
 
+func keyboardFocusPoint(for element: AXUIElement, bounds: BoundsPayload) -> CGPoint {
+  let role = axString(element, kAXRoleAttribute as String) ?? ""
+  let isLargeTextInput = (role == kAXTextAreaRole as String || role == "AXWebArea") && bounds.width > 180 && bounds.height > 80
+  if isLargeTextInput {
+    return CGPoint(
+      x: bounds.x + min(max(bounds.width * 0.08, 24), 96),
+      y: bounds.y + min(max(bounds.height * 0.08, 24), 44)
+    )
+  }
+
+  return CGPoint(x: bounds.x + (bounds.width / 2), y: bounds.y + (bounds.height / 2))
+}
+
 func focusPoint(for appRef: String) -> CGPoint? {
   if let app = resolveApp(appRef) {
     if let focusedElement = preferredKeyboardFocusElement(for: app), let bounds = axBounds(focusedElement) {
-      return CGPoint(x: bounds.x + (bounds.width / 2), y: bounds.y + (bounds.height / 2))
+      return keyboardFocusPoint(for: focusedElement, bounds: bounds)
     }
   }
 
@@ -1870,6 +1997,7 @@ func getAppStateResult(
 
   let app = resolvedApp ?? runningApp(for: entry.pid)
   let captureEntry = prepareAppForStateCapture(app: app, entry: entry)
+  revealObservationPoint(appRef: appRef, entry: captureEntry)
   let title = entry.title
   let bundleId = app?.bundleIdentifier ?? appRef
   let appName = app?.localizedName ?? entry.ownerName
@@ -1896,6 +2024,7 @@ func getAppStateResult(
     meta: MetaPayload(observedShape: "state+image", rawText: rawText),
     error: nil
   )
+  OverlayCursorController.shared.extendVisibility()
   return result
 }
 
@@ -2007,6 +2136,9 @@ func withActivatedApp<T>(
   }
 
   OverlayCursorController.shared.configure(for: targetEntry)
+  if activate, let targetEntry {
+    OverlayCursorController.shared.showActivity(at: windowCenter(targetEntry), wiggle: false)
+  }
   let result = action()
 
   if restorePreviousFocus, let previousFrontmost, previousFrontmost.processIdentifier != targetApp?.processIdentifier {
@@ -2103,7 +2235,7 @@ func clickResult(params: [String: JSONValue]) -> ResultPayload {
       let pressed = performSemanticClick(at: location, appRef: appRef)
       if pressed {
         OverlayCursorController.shared.pulse()
-        OverlayCursorController.shared.scheduleIdleHide()
+        OverlayCursorController.shared.extendVisibility()
       }
       return pressed
     }
@@ -2119,7 +2251,7 @@ func clickResult(params: [String: JSONValue]) -> ResultPayload {
       OverlayCursorController.shared.animate(to: location)
       let clickSucceeded = postClick(at: location, button: button, clickCount: clickCount)
       OverlayCursorController.shared.pulse()
-      OverlayCursorController.shared.scheduleIdleHide()
+      OverlayCursorController.shared.extendVisibility()
       return clickSucceeded
     }
   }
@@ -2186,7 +2318,7 @@ func dragResult(params: [String: JSONValue]) -> ResultPayload {
     }
     upEvent.post(tap: .cghidEventTap)
     OverlayCursorController.shared.pulse()
-    OverlayCursorController.shared.scheduleIdleHide()
+    OverlayCursorController.shared.extendVisibility()
     return true
   }
 
@@ -2330,13 +2462,16 @@ func typeTextResult(params: [String: JSONValue]) -> ResultPayload {
       return false
     }
 
-    for character in text {
+    for (index, character) in text.enumerated() {
       if !typeCharacter(character) {
         return false
       }
+      if index % 30 == 0 {
+        OverlayCursorController.shared.extendVisibility()
+      }
       usleep(keyRepeatDelayMicros)
     }
-    OverlayCursorController.shared.scheduleIdleHide()
+    OverlayCursorController.shared.extendVisibility()
     return true
   }
 
@@ -2372,12 +2507,12 @@ func pressKeyResult(params: [String: JSONValue]) -> ResultPayload {
 
     if let code = keyCode(for: rawKey) {
       let posted = postKeyCode(code, flags: flags)
-      OverlayCursorController.shared.scheduleIdleHide()
+      OverlayCursorController.shared.extendVisibility()
       return posted
     }
     if rawKey.count == 1 {
       let posted = unicodeKeyPair(text: rawKey, flags: flags)
-      OverlayCursorController.shared.scheduleIdleHide()
+      OverlayCursorController.shared.extendVisibility()
       return posted
     }
     return false
@@ -2430,7 +2565,7 @@ func setValueResult(params: [String: JSONValue]) -> ResultPayload {
     return makeErrorResult(toolName: "set_value", code: "accessibility_error", message: "Accessibility error: Unable to set element value")
   }
 
-  OverlayCursorController.shared.scheduleIdleHide()
+  OverlayCursorController.shared.extendVisibility()
   usleep(actionSettleDelayMicros)
   return getAppStateResult(appRef: appRef)
 }
@@ -2497,7 +2632,7 @@ func performSecondaryActionResult(params: [String: JSONValue]) -> ResultPayload 
         OverlayCursorController.shared.animate(to: center)
         let clicked = postClick(at: center)
         OverlayCursorController.shared.pulse()
-        OverlayCursorController.shared.scheduleIdleHide()
+        OverlayCursorController.shared.extendVisibility()
         return clicked
       }
 
@@ -2596,7 +2731,7 @@ func scrollResult(params: [String: JSONValue]) -> ResultPayload {
 
     event.post(tap: .cghidEventTap)
     OverlayCursorController.shared.pulse()
-    OverlayCursorController.shared.scheduleIdleHide(after: 1.0)
+    OverlayCursorController.shared.extendVisibility()
     return true
   }
 

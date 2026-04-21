@@ -220,6 +220,7 @@ What already works:
 - background-first AX actions where macOS allows it
 - pointer actions with focus restore
 - a visible animated second cursor overlay
+- cursor observability during state reads, app activation, text input, and pointer actions
 
 Stage Manager note:
 
