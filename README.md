@@ -219,13 +219,13 @@ What already works:
 - semantic element IDs like `main`, `AllClear`, `Delete`
 - background-first AX actions where macOS allows it
 - pointer actions with focus restore
+- a visible animated second cursor overlay
 
 Stage Manager note:
 
 - when a target app is represented only as a Stage Manager side thumbnail, the native helper attempts to add it to the current stage through `WindowManager` Accessibility actions before capturing
 - this avoids using the user's real cursor and then restores the previous frontmost app
 - the mechanism relies on nonstandard macOS AX actions such as `AXAddToStage`, so behavior may vary across macOS versions
-- a visible animated second cursor overlay
 
 Current limitations:
 
@@ -316,13 +316,21 @@ That is expected.
 
 ## Roadmap
 
+Recently completed:
+
+- made the native helper the default backend and kept the CLI backend as an explicit fallback
+- improved normal interaction latency with shorter fixed waits and native helper reuse
+- moved screenshots to ScreenCaptureKit-only window capture
+- improved app listing speed and ordering with Spotlight metadata
+- added Stage Manager thumbnail materialization without moving the hardware cursor
+
 Likely next steps:
 
-- make it faster to use the computer
-- add background control capabilities closer to Codex `@Computer Use`
-- improve visualization
+- expand background control capabilities closer to Codex `@Computer Use`
+- harden Stage Manager behavior across macOS versions
+- improve second cursor visualization and motion quality
+- polish source-install packaging
 - signed helper app packaging
 - notarization
 - cleaner permission onboarding
-- tighter `list_apps` ordering and naming parity
 - tighter parity for text formatting and localization
