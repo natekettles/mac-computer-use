@@ -195,13 +195,15 @@ final class OverlayCursorController {
   func scheduleIdleHide(after delay: TimeInterval? = nil) {
     cancelHide()
     let workItem = DispatchWorkItem { [weak self] in
-      guard let self, let window = self.window else {
-        return
+      DispatchQueue.main.async { [weak self] in
+        guard let self, let window = self.window else {
+          return
+        }
+        self.view?.pulseAlpha = 0
+        self.view?.pressed = false
+        window.alphaValue = 0
+        window.orderOut(nil)
       }
-      self.view?.pulseAlpha = 0
-      self.view?.pressed = false
-      window.alphaValue = 0
-      window.orderOut(nil)
     }
     hideWorkItem = workItem
     overlayQueue.asyncAfter(deadline: .now() + (delay ?? idleHideDelay), execute: workItem)
@@ -439,7 +441,6 @@ enum JSONValue: Codable {
 
 let decoder = JSONDecoder()
 let encoder = JSONEncoder()
-let timingInstrumentationEnabled = ProcessInfo.processInfo.environment["COMPUTER_USE_TIMING"] == "1"
 
 let windowEntriesCacheTTL: TimeInterval = 0.2
 let appMetadataCacheTTL: TimeInterval = 30
@@ -454,23 +455,6 @@ var cachedWindowEntries: [WindowEntry] = []
 var cachedWindowEntriesAt: Date?
 var cachedAppMetadataIndex: [String: AppMetadata] = [:]
 var cachedAppMetadataAt: Date?
-
-func timingStart() -> DispatchTime {
-  DispatchTime.now()
-}
-
-func timingMillis(since start: DispatchTime) -> Double {
-  Double(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000
-}
-
-func logTiming(_ label: String, _ details: String? = nil, since start: DispatchTime) {
-  guard timingInstrumentationEnabled else {
-    return
-  }
-
-  let suffix = details.map { " \($0)" } ?? ""
-  FileHandle.standardError.write(Data(String(format: "[timing] %@%.0fms%@\n", label, timingMillis(since: start), suffix).utf8))
-}
 
 func waitForAsyncResult(
   timeout: TimeInterval,
@@ -509,18 +493,15 @@ func makeErrorResult(toolName: String, code: String, message: String) -> ResultP
 }
 
 func windowEntries() -> [WindowEntry] {
-  let start = timingStart()
   if let cachedAt = cachedWindowEntriesAt,
     Date().timeIntervalSince(cachedAt) < windowEntriesCacheTTL
   {
-    logTiming("windowEntries ", "cache=hit count=\(cachedWindowEntries.count)", since: start)
     return cachedWindowEntries
   }
 
   guard let infoList = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
     as? [[String: Any]]
   else {
-    logTiming("windowEntries ", "cache=miss count=0", since: start)
     return []
   }
 
@@ -543,9 +524,9 @@ func windowEntries() -> [WindowEntry] {
 
     let width = boundsDict["Width"] as? Double ?? 0
     let height = boundsDict["Height"] as? Double ?? 0
-      if width < 40 || height < 40 {
-        return nil
-      }
+    if width < 20 || height < 20 {
+      return nil
+    }
 
     let x = boundsDict["X"] as? Double ?? 0
     let y = boundsDict["Y"] as? Double ?? 0
@@ -558,8 +539,13 @@ func windowEntries() -> [WindowEntry] {
 
   cachedWindowEntries = entries
   cachedWindowEntriesAt = Date()
-  logTiming("windowEntries ", "cache=miss count=\(entries.count)", since: start)
   return entries
+}
+
+func refreshWindowEntries() -> [WindowEntry] {
+  cachedWindowEntries = []
+  cachedWindowEntriesAt = nil
+  return windowEntries()
 }
 
 func runningApp(for pid: pid_t) -> NSRunningApplication? {
@@ -759,19 +745,15 @@ func mdQueryAppMetadataIndex() -> [String: AppMetadata] {
 }
 
 func appMetadataIndex() -> [String: AppMetadata] {
-  let start = timingStart()
   if let cachedAt = cachedAppMetadataAt,
     Date().timeIntervalSince(cachedAt) < appMetadataCacheTTL
   {
-    logTiming("appMetadataIndex ", "cache=hit count=\(cachedAppMetadataIndex.count)", since: start)
     return cachedAppMetadataIndex
   }
 
   var byBundleId = mdQueryAppMetadataIndex()
-  var source = "mdquery"
 
   if byBundleId.isEmpty {
-    source = "mdls"
     for path in installedApplicationPaths() {
       guard let metadata = mdlsMetadata(for: path), let bundleId = metadata.bundleId else {
         continue
@@ -791,7 +773,6 @@ func appMetadataIndex() -> [String: AppMetadata] {
 
   cachedAppMetadataIndex = byBundleId
   cachedAppMetadataAt = Date()
-  logTiming("appMetadataIndex ", "cache=miss source=\(source) count=\(byBundleId.count)", since: start)
   return byBundleId
 }
 
@@ -878,7 +859,6 @@ func isLikelyUserFacingApp(_ app: NSRunningApplication, visiblePIDs: Set<pid_t>,
 }
 
 func listAppsResult() -> ResultPayload {
-  let start = timingStart()
   let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
   let visiblePIDs = Set(windowEntries().map(\.pid))
   let metadataByBundleId = appMetadataIndex()
@@ -1045,7 +1025,6 @@ func listAppsResult() -> ResultPayload {
     meta: MetaPayload(observedShape: "text", rawText: rawText),
     error: nil
   )
-  logTiming("list_apps ", "apps=\(apps.count)", since: start)
   return result
 }
 
@@ -1087,6 +1066,113 @@ func windowInfo(for pid: pid_t) -> WindowEntry? {
 
 func resolvedWindowInfo(appRef: String) -> WindowEntry? {
   (resolveApp(appRef).flatMap { windowInfo(for: $0.processIdentifier) }) ?? resolveWindowEntry(appRef)
+}
+
+func isLikelyStageManagerThumbnail(_ entry: WindowEntry) -> Bool {
+  entry.bounds.minX < 180 && entry.bounds.width <= 340 && entry.bounds.height <= 220
+}
+
+func windowManagerPID() -> pid_t? {
+  let infoList = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+    as? [[String: Any]] ?? []
+  return infoList.compactMap { info -> pid_t? in
+    guard (info[kCGWindowOwnerName as String] as? String) == "WindowManager" else {
+      return nil
+    }
+    return info[kCGWindowOwnerPID as String] as? pid_t
+  }.first
+}
+
+func axElementArray(_ element: AXUIElement, _ attribute: String) -> [AXUIElement] {
+  (axValue(element, attribute) as? [AXUIElement]) ?? []
+}
+
+func axFrame(_ element: AXUIElement) -> CGRect? {
+  guard let value = axTypedValue(element, "AXFrame") else {
+    return nil
+  }
+
+  var rect = CGRect.zero
+  guard AXValueGetValue(value, .cgRect, &rect) else {
+    return nil
+  }
+  return rect
+}
+
+func collectStageManagerButtons(_ element: AXUIElement, into output: inout [AXUIElement], depth: Int = 0) {
+  if depth > 8 {
+    return
+  }
+
+  if axActions(element).contains("AXAddToStage") {
+    output.append(element)
+  }
+
+  for child in axElementArray(element, kAXChildrenAttribute as String) {
+    collectStageManagerButtons(child, into: &output, depth: depth + 1)
+  }
+  for child in axElementArray(element, "AXContents") {
+    collectStageManagerButtons(child, into: &output, depth: depth + 1)
+  }
+  for child in axElementArray(element, "AXWindows") {
+    collectStageManagerButtons(child, into: &output, depth: depth + 1)
+  }
+}
+
+func stageManagerButton(for entry: WindowEntry) -> AXUIElement? {
+  guard let pid = windowManagerPID() else {
+    return nil
+  }
+
+  let root = AXUIElementCreateApplication(pid)
+  var buttons: [AXUIElement] = []
+  collectStageManagerButtons(root, into: &buttons)
+  let targetMid = CGPoint(x: entry.bounds.midX, y: entry.bounds.midY)
+  return buttons.min { left, right in
+    let leftFrame = axFrame(left) ?? .zero
+    let rightFrame = axFrame(right) ?? .zero
+    let leftDistance = hypot(leftFrame.midX - targetMid.x, leftFrame.midY - targetMid.y)
+    let rightDistance = hypot(rightFrame.midX - targetMid.x, rightFrame.midY - targetMid.y)
+    return leftDistance < rightDistance
+  }
+}
+
+func addStageManagerThumbnailToCurrentStack(entry: WindowEntry, previousFrontmost: NSRunningApplication?) -> WindowEntry? {
+  guard let button = stageManagerButton(for: entry) else {
+    return nil
+  }
+
+  let addError = AXUIElementPerformAction(button, "AXAddToStage" as CFString)
+  usleep(appActivationDelayMicros)
+
+  var refreshedEntry = refreshWindowEntries().first { $0.windowID == entry.windowID }
+  if addError == .success, let currentEntry = refreshedEntry, isLikelyStageManagerThumbnail(currentEntry) {
+    _ = AXUIElementPerformAction(button, kAXPressAction as CFString)
+    usleep(appActivationDelayMicros)
+    refreshedEntry = refreshWindowEntries().first { $0.windowID == entry.windowID }
+  }
+
+  if let previousFrontmost {
+    previousFrontmost.activate()
+    usleep(appActivationDelayMicros)
+  }
+
+  return refreshedEntry
+}
+
+func prepareAppForStateCapture(app: NSRunningApplication?, entry: WindowEntry) -> WindowEntry {
+  guard let app, app.processIdentifier == entry.pid else {
+    return entry
+  }
+
+  let previousFrontmost = NSWorkspace.shared.frontmostApplication
+  if isLikelyStageManagerThumbnail(entry),
+    let stackedEntry = addStageManagerThumbnailToCurrentStack(entry: entry, previousFrontmost: previousFrontmost)
+  {
+    return stackedEntry
+  }
+
+  return entry
 }
 
 func screenPoint(forScreenshotPoint point: CGPoint, appRef: String) -> CGPoint? {
@@ -1494,7 +1580,6 @@ func walkPresentedAXTree(
 }
 
 func buildAXSnapshot(for app: NSRunningApplication) -> AXSnapshotData {
-  let start = timingStart()
   let root = axRootElement(for: app)
   var elements: [ElementPayload] = []
   var lines: [String] = []
@@ -1537,12 +1622,10 @@ func buildAXSnapshot(for app: NSRunningApplication) -> AXSnapshotData {
       elements: elements,
       warnings: warnings + ["Accessibility tree extraction returned no visible elements."]
     )
-    logTiming("buildAXSnapshot ", "elements=\(elements.count)", since: start)
     return snapshot
   }
 
   let snapshot = AXSnapshotData(treeText: lines.joined(separator: "\n"), elements: elements, warnings: warnings)
-  logTiming("buildAXSnapshot ", "elements=\(elements.count)", since: start)
   return snapshot
 }
 
@@ -1781,21 +1864,17 @@ func getAppStateResult(
   resolvedApp: NSRunningApplication?,
   resolvedEntry: WindowEntry?
 ) -> ResultPayload {
-  let start = timingStart()
   guard let entry = resolvedEntry else {
     return makeErrorResult(toolName: "get_app_state", code: "app_not_found", message: "appNotFound(\"\(appRef)\")")
   }
 
   let app = resolvedApp ?? runningApp(for: entry.pid)
+  let captureEntry = prepareAppForStateCapture(app: app, entry: entry)
   let title = entry.title
   let bundleId = app?.bundleIdentifier ?? appRef
   let appName = app?.localizedName ?? entry.ownerName
-  let screenshotStart = timingStart()
-  let screenshot = captureWindowScreenshot(entry)
-  logTiming("get_app_state.screenshot ", "ok=\(screenshot != nil)", since: screenshotStart)
-  let snapshotStart = timingStart()
+  let screenshot = captureWindowScreenshot(captureEntry)
   let axSnapshot = app.map(buildAXSnapshot)
-  logTiming("get_app_state.ax ", "ok=\(axSnapshot != nil)", since: snapshotStart)
   let bodyText = axSnapshot?.treeText ?? ""
   let treeText = bodyText.isEmpty
     ? "App=\(bundleId) (pid \(entry.pid))\nWindow: \"\(title ?? "<unknown>")\", App: \(appName)."
@@ -1817,7 +1896,6 @@ func getAppStateResult(
     meta: MetaPayload(observedShape: "state+image", rawText: rawText),
     error: nil
   )
-  logTiming("get_app_state ", "elements=\(axSnapshot?.elements.count ?? 0)", since: start)
   return result
 }
 
@@ -1827,7 +1905,6 @@ func pngData(from image: CGImage) -> Data? {
 }
 
 func captureWindowScreenshot(_ entry: WindowEntry) -> ArtifactsPayload? {
-  let start = timingStart()
   let executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
   let helperURL = executableURL.deletingLastPathComponent().appendingPathComponent("WindowCaptureHelper")
   let process = Process()
@@ -1845,11 +1922,20 @@ func captureWindowScreenshot(_ entry: WindowEntry) -> ArtifactsPayload? {
 
   do {
     try process.run()
-    process.waitUntilExit()
+    let deadline = Date().addingTimeInterval(3)
+    while process.isRunning, Date() < deadline {
+      Thread.sleep(forTimeInterval: 0.01)
+    }
+    if process.isRunning {
+      process.terminate()
+      Thread.sleep(forTimeInterval: 0.05)
+      if process.isRunning {
+        process.interrupt()
+      }
+      return nil
+    }
+
     guard process.terminationStatus == 0 else {
-      let errorOutput = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
-        .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-      logTiming("captureWindowScreenshot ", "ok=false error=\(errorOutput)", since: start)
       return nil
     }
 
@@ -1858,15 +1944,12 @@ func captureWindowScreenshot(_ entry: WindowEntry) -> ArtifactsPayload? {
       .trimmingCharacters(in: .whitespacesAndNewlines),
       !base64.isEmpty
     else {
-      logTiming("captureWindowScreenshot ", "ok=false error=empty-output", since: start)
       return nil
     }
 
     let artifacts = ArtifactsPayload(screenshotMimeType: "image/png", screenshotBase64: base64)
-    logTiming("captureWindowScreenshot ", "ok=true source=sck-sidecar bytes=\(base64.count)", since: start)
     return artifacts
   } catch {
-    logTiming("captureWindowScreenshot ", "ok=false", since: start)
     return nil
   }
 }

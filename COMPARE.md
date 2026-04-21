@@ -9,7 +9,7 @@ This compares the current `computer-use/` clone against the bundled Codex `@Comp
 - live bundled-plugin probes through `mcp__computer_use__*`
 - earlier live validations already recorded in [`NOTES.md`](./NOTES.md)
 
-Date: `2026-04-18`
+Date: `2026-04-21`
 
 ## Validation Summary
 
@@ -165,13 +165,40 @@ Clone behavior:
 - image output is present on both `get_app_state` and post-action results
 - helper-owned capture now works in the normal path using bounds-based capture from the Swift helper
 - the Node backend fallback still exists, but mainly as a safety net now
+- Stage Manager thumbnails are materialized before capture using `WindowManager` AX actions instead of app activation
 
 Remaining gap:
 
-- capture is still bounds-based rather than a richer app/window-native capture stack like the bundled plugin likely uses
+- capture is still pragmatic rather than a fully private WindowServer capture stack
 - the fallback layering is still more pragmatic than elegant
 
-### 5. Runtime behavior is still split by host context
+### 5. Stage Manager behavior is now closer
+
+User observation of bundled behavior:
+
+- target windows sometimes briefly appear in the current Codex Stage Manager set
+- Codex returns to the front almost immediately
+- the real hardware cursor does not appear to be used
+
+Clone findings:
+
+- Stage Manager thumbnails are represented by `WindowManager` AX buttons.
+- Those buttons expose `AXAddToStage` and `AXPress`.
+- `AXAddToStage` can add a thumbnail to the current stage without moving the user's cursor.
+- For grouped thumbnails, `AXPress` may be required after `AXAddToStage`.
+
+Clone behavior now:
+
+- detects likely Stage Manager thumbnails from small/left-strip window bounds
+- calls `AXAddToStage` on the matching `WindowManager` button
+- falls back to `AXPress` if the window remains thumbnail-sized
+- restores the previous frontmost app before returning state
+
+This is close to the observed bundled "blink" behavior, with one caveat:
+
+- `AXAddToStage` is a nonstandard `WindowManager` AX action and may be OS-version sensitive.
+
+### 6. Runtime behavior is still split by host context
 
 The native helper has already shown two different realities:
 
@@ -193,8 +220,8 @@ Today’s comparison says:
 - snapshot architecture: directionally correct
 - semantic fidelity: partial
 - runtime robustness: better, but still behind the bundled plugin
-- background interaction UX: now closer, with focus restore on `click` and a helper-owned pointer overlay that persists across steps
-- background semantics: materially improved for AX-backed actions, which can now succeed while keeping `Codex` frontmost
+- background interaction UX: now closer, with focus restore on `click`, a helper-owned pointer overlay that persists across steps, and Stage Manager materialization without moving the hardware cursor
+- background semantics: materially improved for AX-backed actions and Stage Manager thumbnails, which can now be materialized while returning `Codex` to the front
 
 ## Highest-Value Compatibility Polish Next
 
@@ -205,3 +232,4 @@ Before adding new features, the highest-value polish items are:
 3. Decide how aggressively to chase background semantics for pointer actions, which likely cannot be truly background-safe across all apps.
 4. Tune the overlay pointer further only if the current motion/look still feels materially off.
 5. Add richer compatibility mapping for action names and element identity across changing trees.
+6. Keep Stage Manager behavior narrowly tested across macOS versions because it depends on `WindowManager` AX actions.

@@ -1,6 +1,6 @@
 # Computer Use Native Helper Plan
 
-Last updated: 2026-04-18
+Last updated: 2026-04-21
 
 ## Goal
 
@@ -226,26 +226,47 @@ This should be fast enough that the user sees at most a brief flicker or “glit
 
 ### Current issue
 
-The current CLI backend uses full-screen `screencapture`.
+The old CLI backend used full-screen `screencapture`.
 
-That is too primitive for Codex-like behavior.
+That is too primitive for Codex-like behavior, especially with Stage Manager enabled.
 
-### Target strategy
+### Current strategy
 
-The helper should become window-aware:
+The helper is window-aware:
 
 1. identify target window bounds
-2. capture the display
-3. crop to target window bounds when appropriate
-4. optionally keep both:
-   - full-screen source
-   - window-focused crop
+2. detect when the target is a Stage Manager thumbnail
+3. materialize that thumbnail into the current stage when needed
+4. capture the target window through the Swift sidecar
+5. return a window-focused screenshot artifact
 
 ### Why this matters
 
 - lets the model reason about a specific app while the user keeps working elsewhere
 - matches the observed “background” feel better
 - reduces noise in returned screenshots
+
+### Stage Manager materialization
+
+Stage Manager thumbnails are not normal app windows for screenshot purposes. They can appear as tiny app-owned windows in the left strip, and capturing them directly returns a thumbnail-sized image.
+
+The current implementation uses `WindowManager` Accessibility actions when a target looks like a Stage Manager thumbnail:
+
+- Find the matching `WindowManager` thumbnail button.
+- Call `AXAddToStage` to add the thumbnail to the current stage without moving the hardware cursor.
+- If the target remains thumbnail-sized, call `AXPress` as a fallback for grouped thumbnails.
+- Restore the previous frontmost app after the brief materialization.
+- Capture the materialized target window by ID.
+
+This is intentionally different from plain `NSRunningApplication.activate()`:
+
+- `activate()` switches the user's active Stage Manager set.
+- `AXAddToStage`/`AXPress` on the Stage Manager thumbnail preserves the current set and produces the bundled-style quick blink.
+
+Risk:
+
+- `AXAddToStage` is a nonstandard `WindowManager` AX action, not a stable public API.
+- Keep the behavior narrowly gated to likely Stage Manager thumbnails and retain screenshot timeout handling.
 
 ## Accessibility Tree Strategy
 

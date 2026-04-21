@@ -55,7 +55,7 @@ After changing permissions, fully restart the host app.
 Recommended path:
 
 ```bash
-npm run start:native
+npm run start
 ```
 
 Alternative CLI backend:
@@ -64,7 +64,7 @@ Alternative CLI backend:
 npm run start:cli
 ```
 
-The CLI backend exists mainly for comparison and fallback. The native-helper backend is the intended path.
+The native-helper backend is the default path. The CLI backend exists mainly for comparison and fallback.
 
 Smoke test:
 
@@ -215,9 +215,16 @@ What already works:
 - app listing
 - app/window state snapshots with accessibility tree text
 - screenshot artifacts in MCP responses
+- Stage Manager thumbnail materialization for screenshots without moving the hardware cursor
 - semantic element IDs like `main`, `AllClear`, `Delete`
 - background-first AX actions where macOS allows it
 - pointer actions with focus restore
+
+Stage Manager note:
+
+- when a target app is represented only as a Stage Manager side thumbnail, the native helper attempts to add it to the current stage through `WindowManager` Accessibility actions before capturing
+- this avoids using the user's real cursor and then restores the previous frontmost app
+- the mechanism relies on nonstandard macOS AX actions such as `AXAddToStage`, so behavior may vary across macOS versions
 - a visible animated second cursor overlay
 
 Current limitations:
@@ -258,10 +265,10 @@ Main files:
 
 - restart the MCP host app after pulling new changes
 - re-run a real pointer action like `click` or `scroll`
-- verify you are using the native-helper backend, not the CLI backend:
+- verify you are using the default native-helper backend:
 
 ```bash
-npm run start:native
+npm run start
 ```
 
 ### Actions fail with accessibility errors

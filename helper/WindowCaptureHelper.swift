@@ -2,6 +2,8 @@ import Foundation
 import ScreenCaptureKit
 import AppKit
 
+_ = NSApplication.shared
+
 struct CaptureRequest {
   let pid: pid_t
   let windowID: CGWindowID?
@@ -61,7 +63,7 @@ func chooseWindow(in content: SCShareableContent, request: CaptureRequest) -> SC
   }
 
   let candidates = content.windows.filter { window in
-    guard window.owningApplication?.processID == request.pid, window.isOnScreen else {
+    guard window.owningApplication?.processID == request.pid else {
       return false
     }
     if let title = request.title, let windowTitle = window.title {
@@ -80,6 +82,26 @@ func chooseWindow(in content: SCShareableContent, request: CaptureRequest) -> SC
   }
 }
 
+func captureDisplayWindow(_ window: SCWindow, display: SCDisplay, timeoutSeconds: TimeInterval = 2) -> CGImage? {
+  let semaphore = DispatchSemaphore(value: 0)
+  let filter = SCContentFilter(display: display, including: [window])
+  let config = SCStreamConfiguration()
+  config.width = max(Int(window.frame.width.rounded(.up)), 1)
+  config.height = max(Int(window.frame.height.rounded(.up)), 1)
+  config.showsCursor = false
+
+  var image: CGImage?
+  SCScreenshotManager.captureImage(contentFilter: filter, configuration: config) { capturedImage, _ in
+    image = capturedImage
+    semaphore.signal()
+  }
+
+  guard semaphore.wait(timeout: .now() + timeoutSeconds) == .success else {
+    return nil
+  }
+  return image
+}
+
 func fail(_ message: String) -> Never {
   FileHandle.standardError.write(Data((message + "\n").utf8))
   exit(1)
@@ -91,7 +113,7 @@ guard let request = parseArguments() else {
 
 let contentSemaphore = DispatchSemaphore(value: 0)
 var shareableContent: SCShareableContent?
-SCShareableContent.getExcludingDesktopWindows(true, onScreenWindowsOnly: true) { content, _ in
+SCShareableContent.getExcludingDesktopWindows(true, onScreenWindowsOnly: false) { content, _ in
   shareableContent = content
   contentSemaphore.signal()
 }
@@ -104,20 +126,7 @@ else {
   fail("screen capture window lookup failed")
 }
 
-let filter = SCContentFilter(display: display, including: [window])
-let config = SCStreamConfiguration()
-config.width = max(Int(window.frame.width.rounded(.up)), 1)
-config.height = max(Int(window.frame.height.rounded(.up)), 1)
-
-let captureSemaphore = DispatchSemaphore(value: 0)
-var capturedImage: CGImage?
-SCScreenshotManager.captureImage(contentFilter: filter, configuration: config) { image, _ in
-  capturedImage = image
-  captureSemaphore.signal()
-}
-
-guard captureSemaphore.wait(timeout: .now() + 2) == .success,
-  let capturedImage,
+guard let capturedImage = captureDisplayWindow(window, display: display),
   let data = pngData(from: capturedImage)
 else {
   fail("screen capture image capture failed")

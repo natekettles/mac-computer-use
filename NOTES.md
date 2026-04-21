@@ -1,6 +1,6 @@
 # Computer Use Reverse-Engineering Notes
 
-Last updated: 2026-04-17
+Last updated: 2026-04-21
 
 ## Purpose
 
@@ -172,6 +172,42 @@ Practical implication for the clone architecture:
   - screenshot capture and optional per-window cropping
   - focus save/restore
   - overlay rendering for the automation cursor
+
+### Stage Manager window materialization
+
+New finding from live macOS probes:
+
+- Stage Manager side thumbnails appear in `CGWindowListCopyWindowInfo` as small app-owned windows and `WindowManager` overlay windows.
+- Thumbnail windows can have negative or very small left-strip bounds, for example:
+  - `Calculette` at roughly `-305,433,33x62`
+  - `TextEdit` at roughly `-293,399,90x85`
+- Capturing those bounds directly produces thumbnail-sized screenshots, not useful app state.
+- The bundled Computer Use behavior the user observed appears to briefly add the target thumbnail into the current Stage Manager set, then restore Codex.
+
+Important Accessibility discovery:
+
+- `WindowManager` exposes Stage Manager thumbnail buttons via AX.
+- Those buttons expose nonstandard actions:
+  - `AXAddToStage`
+  - `AXPress`
+- Calling `AXAddToStage` can add the target thumbnail to the current stage without moving the real hardware cursor.
+- For grouped thumbnails, `AXAddToStage` may return success but leave the specific target thumbnail-sized.
+- In that grouped case, `AXPress` on the same `WindowManager` button expands/focuses the target; immediately restoring the previous frontmost app gives the quick "blink" behavior observed in bundled Computer Use.
+
+Current clone strategy:
+
+- Detect likely Stage Manager thumbnails by small/left-strip bounds.
+- Find the nearest `WindowManager` AX button with `AXAddToStage`.
+- Call `AXAddToStage`.
+- If the target window is still thumbnail-sized, call `AXPress` as fallback.
+- Restore the previous frontmost app.
+- Capture by stable window ID after the target has materialized in the current set.
+
+Why this matters:
+
+- This avoids moving or clicking the user's real cursor.
+- It matches the observed "brief target window blink, Codex returns to front" behavior better than plain app activation.
+- It is still based on a nonstandard/private AX action, so it may be OS-version sensitive.
 
 ### Native helper runtime constraint
 

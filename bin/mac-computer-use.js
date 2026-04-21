@@ -4,8 +4,6 @@ import { spawn } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-process.env.COMPUTER_USE_BACKEND ??= "native-helper";
-
 const binDir = path.dirname(fileURLToPath(import.meta.url));
 const serverPath = path.resolve(binDir, "../src/server.ts");
 

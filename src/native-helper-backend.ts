@@ -70,6 +70,14 @@ export class NativeHelperBackend implements ComputerUseBackend {
     return this.send("perform_secondary_action", _params as unknown as Record<string, unknown>);
   }
 
+  close(): void {
+    if (!this.child) {
+      return;
+    }
+    this.child.kill();
+    this.child = null;
+  }
+
   private async send(method: HelperMethod, params: Record<string, unknown>): Promise<ComputerUseToolResult> {
     await this.ensureHelperBinary();
     const child = this.ensureChild();
@@ -129,9 +137,6 @@ export class NativeHelperBackend implements ComputerUseBackend {
     child.stderr.on("data", (chunk: Buffer | string) => {
       const text = chunk.toString();
       stderr += text;
-      if (process.env.COMPUTER_USE_TIMING === "1") {
-        process.stderr.write(text);
-      }
     });
 
     child.on("error", (error) => {

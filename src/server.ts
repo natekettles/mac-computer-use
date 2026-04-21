@@ -174,9 +174,9 @@ export async function startServer(): Promise<void> {
   });
 
   const backend =
-    process.env.COMPUTER_USE_BACKEND === "native-helper"
-      ? new NativeHelperBackend()
-      : new CliComputerUseBackend();
+    process.env.COMPUTER_USE_BACKEND === "cli"
+      ? new CliComputerUseBackend()
+      : new NativeHelperBackend();
 
   registerTools(server, backend);
 

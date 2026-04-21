@@ -30,39 +30,43 @@ async function main() {
   const backend = new NativeHelperBackend();
   const appRef = process.argv[2] ?? "com.apple.calculator";
 
-  await launchApp(appRef);
+  try {
+    await launchApp(appRef);
 
-  const apps = await backend.listApps({});
-  assert(apps.ok, `list_apps failed: ${errorMessage(apps)}`);
+    const apps = await backend.listApps({});
+    assert(apps.ok, `list_apps failed: ${errorMessage(apps)}`);
 
-  const appCount = Array.isArray(apps.data?.apps) ? apps.data.apps.length : 0;
-  assert(appCount > 0, "list_apps returned no apps");
+    const appCount = Array.isArray(apps.data?.apps) ? apps.data.apps.length : 0;
+    assert(appCount > 0, "list_apps returned no apps");
 
-  const state = await backend.getAppState({ app: appRef });
-  assert(state.ok, `get_app_state failed for ${appRef}: ${errorMessage(state)}`);
-  assert(Boolean(state.artifacts?.screenshotBase64), "get_app_state returned no screenshot artifact");
-  assert((state.snapshot?.elements?.length ?? 0) > 0, "get_app_state returned no accessibility elements");
+    const state = await backend.getAppState({ app: appRef });
+    assert(state.ok, `get_app_state failed for ${appRef}: ${errorMessage(state)}`);
+    assert(Boolean(state.artifacts?.screenshotBase64), "get_app_state returned no screenshot artifact");
+    assert((state.snapshot?.elements?.length ?? 0) > 0, "get_app_state returned no accessibility elements");
 
-  const frontmost =
-    Array.isArray(apps.data?.apps) && apps.data.apps.find((app) => app.frontmost)?.name
-      ? apps.data.apps.find((app) => app.frontmost)?.name
-      : null;
+    const frontmost =
+      Array.isArray(apps.data?.apps) && apps.data.apps.find((app) => app.frontmost)?.name
+        ? apps.data.apps.find((app) => app.frontmost)?.name
+        : null;
 
-  console.log(
-    JSON.stringify(
-      {
-        ok: true,
-        appRef,
-        appCount,
-        frontmost,
-        windowTitle: state.snapshot?.windowTitle ?? null,
-        elementCount: state.snapshot?.elements?.length ?? 0,
-        hasImage: Boolean(state.artifacts?.screenshotBase64),
-      },
-      null,
-      2,
-    ),
-  );
+    console.log(
+      JSON.stringify(
+        {
+          ok: true,
+          appRef,
+          appCount,
+          frontmost,
+          windowTitle: state.snapshot?.windowTitle ?? null,
+          elementCount: state.snapshot?.elements?.length ?? 0,
+          hasImage: Boolean(state.artifacts?.screenshotBase64),
+        },
+        null,
+        2,
+      ),
+    );
+  } finally {
+    backend.close();
+  }
 }
 
 async function launchApp(appRef: string) {
